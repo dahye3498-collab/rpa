@@ -148,9 +148,11 @@ if __name__ == "__main__":
     print("=" * 60)
     # threaded=True: SSE 연결마다 별도 스레드
     # use_reloader=False: 리로더가 파이프라인 스레드를 이중 기동하지 않도록
+    import os
+    port = int(os.environ.get("PORT", 5000))
     app.run(
         host="0.0.0.0",
-        port=5000,
+        port=port,
         debug=False,
         threaded=True,
         use_reloader=False,
