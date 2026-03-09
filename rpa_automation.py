@@ -402,7 +402,8 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
 
     with sync_playwright() as p:
         # 1. 브라우저 초기화 (한 번만 열고 날짜별로 반복)
-        browser = p.chromium.launch(headless=False)
+        is_server = os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
+        browser = p.chromium.launch(headless=bool(is_server))
         context = browser.new_context(viewport={'width': 1280, 'height': 1024})
         page = context.new_page()
 
