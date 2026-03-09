@@ -357,7 +357,7 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
 
     return captured_data
 
-def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None):
+def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, credentials=None):
     """
     캡처 RPA를 실행합니다.
 
@@ -380,6 +380,11 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None):
     hooks = hooks or {}
     on_step = hooks.get("on_step")
     check_pause_stop = hooks.get("check_pause_stop")
+
+    # 카카오 로그인 정보 (credentials 우선, 없으면 환경변수 fallback)
+    cred = credentials or {}
+    _login_email = cred.get("login_email") or LOGIN_EMAIL
+    _login_pwd = cred.get("login_pwd") or LOGIN_PWD
 
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     vision_meat_root = os.path.join(BASE_DIR, "visionmeat")
@@ -466,7 +471,7 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None):
                         if loc.is_visible(timeout=5000):
                             loc.scroll_into_view_if_needed()
                             loc.click()
-                            page.fill(i_sel, LOGIN_EMAIL)
+                            page.fill(i_sel, _login_email)
                             break
                     except:
                         continue
@@ -478,7 +483,7 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None):
                         if loc.is_visible(timeout=5000):
                             loc.scroll_into_view_if_needed()
                             loc.click()
-                            page.fill(p_sel, LOGIN_PWD)
+                            page.fill(p_sel, _login_pwd)
                             break
                     except:
                         continue

@@ -93,12 +93,19 @@ def api_run():
         except ValueError:
             return jsonify({"ok": False, "message": "날짜 형식 오류 (YYYY-MM-DD)"}), 400
 
+    # 카카오 로그인 정보
+    login_email = data.get("login_email", "").strip()
+    login_pwd = data.get("login_pwd", "")
+    if mode in ("full", "rpa_only") and (not login_email or not login_pwd):
+        return jsonify({"ok": False, "message": "카카오 이메일과 비밀번호를 입력하세요."}), 400
+    credentials = {"login_email": login_email, "login_pwd": login_pwd}
+
     # 게시판 선택 (boards: ["구매","판매","품목표"] 중 선택)
     valid_boards = {"구매", "판매", "품목표", "회원정보", "등업신청"}
     boards_raw = data.get("boards", [])
     target_boards = [b for b in boards_raw if b in valid_boards] or None
 
-    ok = job_manager.start(mode=mode, date_list=date_list, target_boards=target_boards)
+    ok = job_manager.start(mode=mode, date_list=date_list, target_boards=target_boards, credentials=credentials)
     if not ok:
         return jsonify({"ok": False, "message": "이미 작업이 실행 중입니다."}), 400
     return jsonify({"ok": True})

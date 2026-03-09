@@ -531,6 +531,20 @@
         <div class="date-range-hint" id="date-range-hint">날짜를 선택하세요</div>
       </div>
 
+      <!-- 카카오 로그인 정보 -->
+      <div style="display:flex;gap:10px;margin-bottom:8px">
+        <label style="flex:1;font-size:0.85rem;color:var(--text)">
+          카카오 이메일
+          <input type="email" id="login-email" placeholder="example@email.com"
+            style="width:100%;margin-top:4px;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:0.9rem">
+        </label>
+        <label style="flex:1;font-size:0.85rem;color:var(--text)">
+          비밀번호
+          <input type="password" id="login-pwd" placeholder="비밀번호"
+            style="width:100%;margin-top:4px;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:0.9rem">
+        </label>
+      </div>
+
       <!-- 게시판 선택 -->
       <div class="board-select-row">
         <span style="font-size:0.85rem;color:var(--text);font-weight:500">게시판:</span>
@@ -910,6 +924,13 @@ async function startJob(modeOverride) {
     body.date_from = date_from;
     body.date_to   = date_to;
   }
+
+  // 카카오 로그인 정보
+  const loginEmail = document.getElementById("login-email").value.trim();
+  const loginPwd   = document.getElementById("login-pwd").value;
+  if (!loginEmail || !loginPwd) { alert("카카오 이메일과 비밀번호를 입력하세요."); return; }
+  body.login_email = loginEmail;
+  body.login_pwd   = loginPwd;
 
   // 게시판 선택
   const boards = [...document.querySelectorAll(".board-chip input:checked")].map(c => c.value);

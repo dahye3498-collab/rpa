@@ -128,12 +128,13 @@ class JobManager:
         self._broadcast({"type": "progress", "progress": snap})
 
     # ── 외부 제어 메서드 ──────────────────────────────────────
-    def start(self, mode: str = "full", date_list=None, target_boards=None) -> bool:
+    def start(self, mode: str = "full", date_list=None, target_boards=None, credentials=None) -> bool:
         """
         작업 시작. 이미 실행/일시정지 상태면 False 반환.
         mode: "full" | "rpa_only" | "batch_only"
         date_list: ['YYYY-MM-DD', ...] 지정 시 해당 날짜만 처리. None이면 자동 감지.
         target_boards: ["구매","판매","품목표"] 중 선택. None이면 전체.
+        credentials: {"login_email": "...", "login_pwd": "..."} 카카오 로그인 정보.
         """
         with self._lock:
             if self.state not in ("IDLE",):
@@ -146,7 +147,7 @@ class JobManager:
 
         self._thread = threading.Thread(
             target=self._run_pipeline,
-            args=(mode, date_list, target_boards),
+            args=(mode, date_list, target_boards, credentials),
             daemon=True,
             name="pipeline-worker",
         )
@@ -339,11 +340,12 @@ class JobManager:
             self._log(msg)
 
     # ── 파이프라인 실행 ───────────────────────────────────────
-    def _run_pipeline(self, mode: str, date_list=None, target_boards=None) -> None:
+    def _run_pipeline(self, mode: str, date_list=None, target_boards=None, credentials=None) -> None:
         """
         date_list: ['YYYY-MM-DD', ...] 지정 시 해당 날짜만 처리.
                    None이면 자동 감지 (get_missing_dates).
         target_boards: ["구매","판매","품목표"] 중 선택. None이면 전체.
+        credentials: {"login_email": "...", "login_pwd": "..."} 카카오 로그인 정보.
         """
         from datetime import datetime as _dt
         hooks = {
@@ -368,7 +370,7 @@ class JobManager:
                         total_dates=len(rpa_dates),
                         message=f"{len(rpa_dates)}개 날짜 캡처 시작",
                     )
-                    rpa_automation.run_rpa(date_list=rpa_dates, hooks=hooks, target_boards=target_boards)
+                    rpa_automation.run_rpa(date_list=rpa_dates, hooks=hooks, target_boards=target_boards, credentials=credentials)
 
             if mode == "rpa_only":
                 self._set_progress(phase="finished", message="캡처 완료", pct=100.0)
