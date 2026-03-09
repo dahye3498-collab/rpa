@@ -3,8 +3,12 @@ import time
 import base64
 import json
 import pandas as pd
-import tkinter as tk
-from tkinter import ttk, messagebox
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+    TK_AVAILABLE = True
+except ImportError:
+    TK_AVAILABLE = False
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
