@@ -434,14 +434,16 @@ class JobManager:
                 expected_excel = os.path.join(
                     e_dir, f"{entry.replace('-', '')}_{board}_데이터.xlsx"
                 )
-                has_screenshots = os.path.isdir(s_dir) and any(
+                dir_exists = os.path.isdir(s_dir)
+                has_screenshots = dir_exists and any(
                     f.lower().endswith((".png", ".jpg", ".jpeg"))
                     for f in os.listdir(s_dir)
-                ) if os.path.isdir(s_dir) else False
+                ) if dir_exists else False
                 has_ocr = os.path.exists(expected_excel)
                 date_info[board] = {
                     "rpa_done": has_screenshots,
                     "ocr_done": has_ocr,
+                    "no_posts": dir_exists and not has_screenshots,
                 }
             result[entry] = date_info
 

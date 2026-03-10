@@ -925,12 +925,14 @@ async function startJob(modeOverride) {
     body.date_to   = date_to;
   }
 
-  // 카카오 로그인 정보
+  // 카카오 로그인 정보 (RPA가 포함된 모드에서만 필수)
   const loginEmail = document.getElementById("login-email").value.trim();
   const loginPwd   = document.getElementById("login-pwd").value;
-  if (!loginEmail || !loginPwd) { alert("카카오 이메일과 비밀번호를 입력하세요."); return; }
-  body.login_email = loginEmail;
-  body.login_pwd   = loginPwd;
+  if (mode !== "batch_only") {
+    if (!loginEmail || !loginPwd) { alert("카카오 이메일과 비밀번호를 입력하세요."); return; }
+  }
+  if (loginEmail) body.login_email = loginEmail;
+  if (loginPwd)   body.login_pwd   = loginPwd;
 
   // 게시판 선택
   const boards = [...document.querySelectorAll(".board-chip input:checked")].map(c => c.value);
@@ -1004,13 +1006,19 @@ async function loadResumeState() {
       html += `<td>${date}</td>`;
       for (const board of ["구매", "판매", "품목표", "회원정보", "등업신청"]) {
         const info = boards[board] || {};
-        const rpa = info.rpa_done
-          ? '<span class="done-rpa">✓ 캡처</span>'
-          : '<span class="not-done">○ 미완</span>';
-        const ocr = info.ocr_done
-          ? '<span class="done-ocr">✓ OCR</span>'
-          : '<span class="not-done">○ 미완</span>';
-        html += `<td>${rpa} / ${ocr}</td>`;
+        if (info.no_posts) {
+          html += `<td><span class="not-done" style="color:#999">게시글없음</span></td>`;
+        } else if (!info.rpa_done && !info.ocr_done) {
+          html += `<td><span class="not-done">수집정보 없음</span></td>`;
+        } else {
+          const rpa = info.rpa_done
+            ? '<span class="done-rpa">✓ 캡처</span>'
+            : '<span class="not-done">○ 미완</span>';
+          const ocr = info.ocr_done
+            ? '<span class="done-ocr">✓ OCR</span>'
+            : '<span class="not-done">○ 미완</span>';
+          html += `<td>${rpa} / ${ocr}</td>`;
+        }
       }
       if (allDone) {
         html += `<td><span class="done-ocr" style="font-size:0.75rem">완료</span></td>`;

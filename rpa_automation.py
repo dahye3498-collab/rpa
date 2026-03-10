@@ -259,6 +259,7 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
             break
 
         consecutive_old_posts = 0
+        found_target_or_older = False
         current_page_posts = []
 
         for row in rows:
@@ -280,6 +281,7 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
 
                     # 수집 대상 날짜의 글만 수집
                     if p_date.date() < collect_date:
+                        found_target_or_older = True
                         consecutive_old_posts += 1
                         if consecutive_old_posts >= 5:
                             log(f"[{board_name}] 과거 글 5개 초과 발견으로 중단합니다. (날짜: {date_str})")
@@ -288,9 +290,10 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
                         continue
 
                     if p_date.date() > collect_date:
-                        # 수집 대상보다 미래 날짜(예: 오늘 글인데 과거 날짜 수집 중)면 스킵
+                        # 수집 대상보다 미래 날짜면 스킵 (과거글 카운터 리셋하지 않음)
                         continue
 
+                    found_target_or_older = True
                     consecutive_old_posts = 0
                     safe_title = "".join([c for c in title if c.isalnum() or c in (' ', '_', '-')]).strip().replace(' ', '_')
                     
@@ -309,8 +312,13 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
                 continue
 
         if not current_page_posts and not stop_searching:
-             log(f"[{board_name}] 현재 페이지에 오늘 작성된 글이 없습니다.")
-             stop_searching = True
+            if found_target_or_older:
+                # 대상 날짜 이하의 글이 이미 나왔는데 수집할 게 없으면 종료
+                log(f"[{board_name}] 현재 페이지에 오늘 작성된 글이 없습니다.")
+                stop_searching = True
+            else:
+                # 아직 미래 글만 나옴 → 다음 페이지에 대상 날짜 글이 있을 수 있음
+                log(f"[{board_name}] 대상 날짜 글이 아직 나오지 않음. 다음 페이지로 계속 탐색...")
 
         for post in current_page_posts:
             log(f"[{board_name}] 캡처 작업 중: {post['title']}")
