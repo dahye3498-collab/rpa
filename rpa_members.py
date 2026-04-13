@@ -264,57 +264,75 @@ def ensure_board(page, selector: str, url: str, timeout_sec: int = 30) -> bool:
 # ---------------------------------------------------------------------------
 # 수집 핵심 로직
 # ---------------------------------------------------------------------------
+def _dump_pagination_html(page) -> str:
+    """페이지네이션 영역 HTML을 반환 (디버그용)."""
+    real_frame = page.frame(name="down")
+    if not real_frame:
+        return "frame not found"
+    try:
+        return real_frame.evaluate("""
+            () => {
+                // 페이지네이션 컨테이너 후보들
+                for (const sel of ['.wrap_page', '.paging', '.paginate', '.pagination',
+                                    '[class*="page"]', 'tfoot', '.board_paging']) {
+                    const el = document.querySelector(sel);
+                    if (el) return sel + ' => ' + el.outerHTML.substring(0, 800);
+                }
+                // 없으면 a 태그 전체 목록
+                const links = Array.from(document.querySelectorAll('a'));
+                return 'ALL_LINKS: ' + links.map(a =>
+                    '[cls=' + a.className + ' txt=' + a.textContent.trim().substring(0,15) + ']'
+                ).join(' | ');
+            }
+        """)
+    except Exception as e:
+        return f"error: {e}"
+
+
 def _click_next_group(page, board_frame) -> bool:
     """
     '다음' 그룹 버튼 클릭.
-    1) FrameLocator로 a.btn_next 클릭
-    2) FrameLocator로 has-text('다음') 클릭
-    3) Frame JS evaluate로 클래스·텍스트 복합 탐색
+    실제 Frame JS로 페이지네이션 HTML을 확인한 뒤 클릭.
     """
-    # 1) FrameLocator: Daum cafe 표준 다음 버튼 클래스
-    for sel in ["a.btn_next", "a.link_next", "a.next"]:
-        try:
-            btn = board_frame.locator(sel).first
-            if btn.count() > 0 and btn.is_visible():
-                btn.click()
-                time.sleep(3)
-                return True
-        except Exception:
-            pass
-
-    # 2) FrameLocator: 텍스트 '다음' 포함 링크
+    real_frame = page.frame(name="down")
+    if not real_frame:
+        return False
     try:
-        btn = board_frame.locator("a:has-text('다음')").last
-        if btn.count() > 0 and btn.is_visible():
-            btn.click()
+        result = real_frame.evaluate("""
+            () => {
+                // 1) 클래스 기반 (Daum cafe 알려진 패턴들)
+                const cls_candidates = ['btn_next', 'link_next', 'next', 'btn-next',
+                                        'page_next', 'paging_next', 'ico_next'];
+                for (const cls of cls_candidates) {
+                    const el = document.querySelector('a.' + cls);
+                    if (el) { el.click(); return 'OK:class=' + cls; }
+                }
+                // 2) 텍스트 완전/부분 일치 (innerText, textContent 모두 시도)
+                for (const a of document.querySelectorAll('a')) {
+                    const t = (a.innerText || a.textContent || '').trim();
+                    if (t === '다음' || t === '다음 페이지') {
+                        a.click(); return 'OK:text=' + t;
+                    }
+                }
+                // 3) title 속성
+                const byTitle = document.querySelector('a[title*="다음"]');
+                if (byTitle) { byTitle.click(); return 'OK:title'; }
+
+                // 실패 시 디버그 정보 반환
+                const links = Array.from(document.querySelectorAll('a'));
+                return 'FAIL|' + links.map(a =>
+                    a.className + ':' + (a.innerText||a.textContent||'').trim().substring(0,10)
+                ).join('||');
+            }
+        """)
+        if result and result.startswith("OK:"):
+            log(f"[페이지이동] {result}")
             time.sleep(3)
             return True
-    except Exception:
-        pass
-
-    # 3) Frame JS: 클래스 + 텍스트 복합 탐색
-    board_real_frame = page.frame(name="down")
-    if board_real_frame:
-        try:
-            clicked = board_real_frame.evaluate("""
-                () => {
-                    // 클래스 기반 탐색
-                    for (const cls of ['btn_next', 'link_next', 'next']) {
-                        const el = document.querySelector('a.' + cls);
-                        if (el) { el.click(); return true; }
-                    }
-                    // 텍스트 기반 탐색 (부분 일치)
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const btn = links.find(a => a.innerText.trim().includes('다음'));
-                    if (btn) { btn.click(); return true; }
-                    return false;
-                }
-            """)
-            if clicked:
-                time.sleep(3)
-                return True
-        except Exception:
-            pass
+        else:
+            log(f"[DEBUG 다음버튼] {str(result)[:300]}")
+    except Exception as e:
+        log(f"[DEBUG 다음버튼 오류] {e}")
     return False
 
 
@@ -355,6 +373,8 @@ def _goto_page(page, board_frame, target: int) -> bool:
     time.sleep(1)
 
     log(f"페이지 {target}까지 점프 시작...")
+    # 첫 hop 전에 페이지네이션 HTML 덤프
+    log(f"[DEBUG 페이지네이션] {_dump_pagination_html(page)}")
     max_hops = target // 10 + 3   # 충분한 여유
 
     for hop in range(max_hops):
