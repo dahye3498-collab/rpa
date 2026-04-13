@@ -267,109 +267,103 @@ def ensure_board(page, selector: str, url: str, timeout_sec: int = 30) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 수집 핵심 로직 (URL 직접 이동 방식 - 페이지 버튼 클릭 불필요)
+# 수집 핵심 로직
 # ---------------------------------------------------------------------------
-def _find_board_frame(page, board_url: str):
-    """page.frames에서 게시판 Frame 객체 찾기"""
-    fldid = board_url.split("fldid=")[-1].split("&")[0]
-    for frame in page.frames:
-        if fldid in frame.url or "bbs_list" in frame.url:
-            return frame
-    return None
+def _next_page(board_frame, page_num: int) -> bool:
+    """
+    다음 페이지로 이동. 성공하면 True.
+    1) 숫자 버튼 직접 클릭
+    2) JS로 '다음' 텍스트 링크 탐색·클릭
+    """
+    # 1) 숫자 버튼
+    try:
+        btn = board_frame.locator(f"a.link_num:has-text('{page_num + 1}')").first
+        if btn.count() > 0 and btn.is_visible():
+            btn.click()
+            time.sleep(3)
+            return True
+    except Exception:
+        pass
+
+    # 2) JS로 '다음' 버튼 탐색
+    try:
+        clicked = board_frame.evaluate("""
+            () => {
+                const links = Array.from(document.querySelectorAll('a'));
+                const btn = links.find(a => a.innerText.trim() === '다음');
+                if (btn) { btn.click(); return true; }
+                return false;
+            }
+        """)
+        if clicked:
+            time.sleep(3)
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     """
-    Frame 객체를 직접 사용하여 페이지 순회.
-    frame.goto()로 페이지 이동, frame.locator()로 요소 접근.
+    버튼 클릭 방식으로 페이지 순회.
+    '다음' 그룹 버튼은 JS 평가로 탐색.
     """
     log(f"[{board_name}] 수집 시작 (cutoff: {CUTOFF_DATE})")
     extracted     = []
     existing_keys = load_existing_keys(board_name)
     seen          = set()
-    start = START_PAGE.get(board_name, 1)
-    page_num      = start
-    MAX_EMPTY_PAGES = 3
-    log(f"[{board_name}] {start}페이지부터 시작")
+    page_num      = 1
+    board_idx     = [b["name"] for b in BOARDS].index(board_name)
 
-    # 게시판 초기 진입 (Frame 활성화)
-    ensure_board(page,
-                 BOARDS[[b["name"] for b in BOARDS].index(board_name)]["selector"],
-                 board_url, timeout_sec=20)
+    # 게시판 진입
+    ensure_board(page, BOARDS[board_idx]["selector"], board_url, timeout_sec=20)
     page.wait_for_timeout(2000)
-
-    # Frame 객체 확보
-    frame = _find_board_frame(page, board_url)
-    if not frame:
-        log(f"[{board_name}] 게시판 Frame 못 찾음 - 전체 frames: {[f.url for f in page.frames]}")
-        return []
-    log(f"[{board_name}] Frame 확보: {frame.url[:60]}")
-
-    empty_streak = 0
+    board_frame = page.frame_locator("iframe#down")
 
     while True:
-        iframe_url = f"{board_url}&page={page_num}"
-        log(f"[{board_name}] 페이지 {page_num} 이동")
-        try:
-            frame.goto(iframe_url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(2000)
-        except Exception as e:
-            log(f"[{board_name}] 페이지 이동 오류: {e}")
-            break
-
-        # Frame 직접 사용 (frame_locator 대신)
-        board_frame = frame
-
+        log(f"[{board_name}] 페이지 {page_num} 읽는 중...")
         try:
             board_frame.locator("a.txt_item").first.wait_for(timeout=10000)
         except Exception:
-            empty_streak += 1
-            log(f"[{board_name}] 페이지 {page_num} 목록 없음 (연속 {empty_streak}회)")
-            if empty_streak >= MAX_EMPTY_PAGES:
-                log(f"[{board_name}] 빈 페이지 {MAX_EMPTY_PAGES}회 연속 → 수집 종료")
-                break
-            page_num += 1
-            continue
-
-        empty_streak = 0
-        rows = board_frame.locator("tr").all()
-        if not rows:
-            log(f"[{board_name}] 마지막 페이지 (페이지 {page_num})")
+            log(f"[{board_name}] 목록 없음 → 종료")
             break
 
-        # ✅ 페이지 첫 번째 일반 글 날짜로 cutoff 판단 (공지 제외)
+        rows = board_frame.locator("tr").all()
+        if not rows:
+            break
+
+        # 첫 일반 글 날짜로 cutoff 판단
         first_date = None
         for row in rows:
             try:
                 row_text = row.inner_text()
-                if row.locator(".ico_notice, .txt_notice, .txt_pill").count() > 0:
+                if row.locator(".ico_notice,.txt_notice,.txt_pill").count() > 0:
                     continue
                 if "공지" in row_text or "필독" in row_text:
                     continue
                 if row.locator("a.txt_item").count() == 0:
                     continue
                 d = row.locator("span.tbl_txt_date").inner_text().strip()
-                title_sample = row.locator("a.txt_item").inner_text().strip()[:15]
                 if d:
                     first_date = parse_date(d).date()
-                    log(f"[{board_name}] 페이지 {page_num} 첫 글: '{title_sample}' / 날짜원문: '{d}' / 파싱: {first_date}")
+                    log(f"[{board_name}] p{page_num} 첫 글 날짜: '{d}' → {first_date}")
                     break
             except Exception:
                 continue
 
         if first_date and first_date < CUTOFF_DATE:
-            log(f"[{board_name}] 페이지 {page_num} cutoff 이전 → 수집 종료")
+            log(f"[{board_name}] cutoff 도달 → 종료")
             break
 
+        # 수집 대상 글 목록
         page_posts = []
         for row in rows:
             try:
-                is_notice = (
-                    row.locator(".ico_notice, .txt_notice, .txt_pill").count() > 0
-                    or "공지" in row.inner_text()
-                    or "필독" in row.inner_text()
-                )
-                if is_notice:
+                row_text = row.inner_text()
+                if row.locator(".ico_notice,.txt_notice,.txt_pill").count() > 0:
+                    continue
+                if "공지" in row_text or "필독" in row_text:
                     continue
                 link_loc = row.locator("a.txt_item")
                 if link_loc.count() == 0:
@@ -377,30 +371,28 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
                 title    = link_loc.inner_text().strip()
                 date_str = row.locator("span.tbl_txt_date").inner_text().strip()
                 p_date   = parse_date(date_str).date()
-
                 if p_date < CUTOFF_DATE:
                     continue
-
                 key = (title, date_str)
-                if key in seen:
+                if key in seen or key in existing_keys:
                     continue
                 seen.add(key)
-                if key in existing_keys:
-                    continue
-
                 href = link_loc.get_attribute("href") or ""
                 page_posts.append({"title": title, "date": date_str, "href": href})
             except Exception:
                 continue
 
         if page_posts:
-            log(f"[{board_name}] 페이지 {page_num}: {len(page_posts)}건 신규")
-        extracted.extend(_visit_posts(page, frame, board_name, page_posts))
+            log(f"[{board_name}] p{page_num}: {len(page_posts)}건 신규 수집")
+        extracted.extend(_visit_posts(page, board_frame, board_name, page_posts))
 
+        # 다음 페이지 이동
+        if not _next_page(board_frame, page_num):
+            log(f"[{board_name}] 마지막 페이지 (p{page_num}) → 종료")
+            break
         page_num += 1
-        time.sleep(3)
 
-    log(f"[{board_name}] 신규 수집 완료: {len(extracted)}건")
+    log(f"[{board_name}] 완료: {len(extracted)}건")
     return extracted
 
 
