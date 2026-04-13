@@ -26,7 +26,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR   = os.path.join(BASE_DIR, "visionmeat", "database")
 
 # 수집 cutoff (이 날짜 이전 글은 수집 안 함)
-CUTOFF_DATE = datetime(2024, 3, 1).date()
+CUTOFF_DATE = datetime(2021, 1, 1).date()
 
 # 게시판별 시작 페이지
 # page25도 2017년 → 기존 2024-04 데이터가 page1~3 수준으로 추정
