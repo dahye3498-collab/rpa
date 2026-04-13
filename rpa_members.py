@@ -709,22 +709,18 @@ def run_rpa_members(credentials=None):
                 save_excel(all_data)
         except KeyboardInterrupt:
             log("\n[!] 중단 감지 → 수집된 데이터 저장 중...")
-            # all_data에 현재까지 완료된 게시판 데이터가 있으면 저장
             any_rows = any(len(v) > 0 for v in all_data.values())
-            if any_rows:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-                save_excel(all_data)
-            else:
+            if not any_rows:
                 log("저장할 신규 데이터 없음.")
-            return
         finally:
             try:
                 browser.close()
             except Exception:
                 pass
+
+        # KeyboardInterrupt 후 저장 (browser 닫힌 뒤 실행)
+        if all_data and any(len(v) > 0 for v in all_data.values()):
+            save_excel(all_data)
 
 
 if __name__ == "__main__":
