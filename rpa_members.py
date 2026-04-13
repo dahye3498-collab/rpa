@@ -205,14 +205,8 @@ def load_existing_keys(board_name: str) -> set:
         date_col  = next((c for c in df.columns if "작성일" in str(c)), None)
         if not title_col or not date_col:
             return set()
-        # 등업신청은 내용 컬럼 없음 → 성명으로 완료 여부 판단
-        if board_name == "등업신청":
-            done_col = next((c for c in df.columns if "성명" in str(c)), None)
-        else:
-            done_col = next((c for c in df.columns if "내용" in str(c)), None)
-        if done_col is not None:
-            has_data = df[done_col].astype(str).str.strip().replace("nan", "") != ""
-            df = df[has_data]
+        # 모든 기존 행을 existing_keys에 포함 (성명/내용 유무 무관)
+        # → 같은 페이지 재방문 시 중복 수집 방지
         keys = set(zip(df[title_col].astype(str), df[date_col].astype(str)))
         log(f"[{board_name}] 기존 완료 {len(keys)}건 → 재수집 스킵 적용")
         return keys
@@ -269,24 +263,8 @@ def ensure_board(page, selector: str, url: str, timeout_sec: int = 30) -> bool:
 # ---------------------------------------------------------------------------
 # 수집 핵심 로직
 # ---------------------------------------------------------------------------
-def _next_page(page, board_frame, page_num: int) -> bool:
-    """
-    다음 페이지로 이동. 성공하면 True.
-    1) 숫자 버튼 직접 클릭 (FrameLocator)
-    2) 실제 Frame 객체로 JS 실행해서 '다음' 버튼 클릭
-    """
-    # 1) 숫자 버튼 클릭 (FrameLocator)
-    try:
-        btn = board_frame.locator(f"a.link_num:has-text('{page_num + 1}')").first
-        if btn.count() > 0 and btn.is_visible():
-            btn.click()
-            time.sleep(3)
-            return True
-    except Exception:
-        pass
-
-    # 2) 실제 Frame 객체로 JS 실행 → '다음' 버튼 클릭
-    # iframe name="down" 확인됨 → page.frame(name="down")으로 직접 접근
+def _click_next_group(page, board_frame) -> bool:
+    """'다음' 그룹 버튼 클릭. Frame JS 방식 사용."""
     board_real_frame = page.frame(name="down")
     if board_real_frame:
         try:
@@ -303,7 +281,60 @@ def _next_page(page, board_frame, page_num: int) -> bool:
                 return True
         except Exception:
             pass
+    return False
 
+
+def _next_page(page, board_frame, page_num: int) -> bool:
+    """
+    다음 페이지로 이동. 성공하면 True.
+    1) 숫자 버튼 직접 클릭 (FrameLocator)
+    2) 실제 Frame 객체로 JS 실행해서 '다음' 버튼 클릭
+    """
+    # 1) 숫자 버튼 클릭 (FrameLocator)
+    try:
+        btn = board_frame.locator(f"a.link_num:has-text('{page_num + 1}')").first
+        if btn.count() > 0 and btn.is_visible():
+            btn.click()
+            time.sleep(3)
+            return True
+    except Exception:
+        pass
+
+    # 2) '다음' 그룹 버튼 클릭
+    return _click_next_group(page, board_frame)
+
+
+def _goto_page(page, board_frame, target: int) -> bool:
+    """
+    현재 page 1에서 target 페이지로 점프.
+    '다음' 버튼으로 그룹(10개씩)을 넘기다가 target 숫자 버튼이 보이면 클릭.
+    예: target=80 → '다음' 7번 (1→11→21→...→71) → '80' 클릭
+    """
+    if target <= 1:
+        return True
+
+    log(f"페이지 {target}까지 점프 시작...")
+    max_hops = target // 10 + 3   # 충분한 여유
+
+    for hop in range(max_hops):
+        # target 버튼이 현재 표시 범위에 있으면 클릭
+        try:
+            btn = board_frame.locator(f"a.link_num:has-text('{target}')").first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click()
+                time.sleep(3)
+                log(f"페이지 {target} 도달 (총 {hop+1}번 그룹 이동)")
+                return True
+        except Exception:
+            pass
+
+        # '다음' 그룹으로 이동
+        log(f"  그룹 이동 {hop+1}번째...")
+        if not _click_next_group(page, board_frame):
+            log(f"'다음' 버튼 없음 → 점프 실패 (hop={hop})")
+            return False
+
+    log(f"페이지 {target} 점프 실패 (max_hops 초과)")
     return False
 
 
@@ -320,21 +351,17 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     page_num      = start_page
     board_idx     = [b["name"] for b in BOARDS].index(board_name)
 
-    # ── 게시판 진입 ──
-    # start_page > 1 이면 URL에 &page=N 붙여 바로 해당 페이지로 이동
-    if start_page > 1:
-        jump_url = board_url.rstrip("&") + f"&page={start_page}"
-        log(f"[{board_name}] 시작 페이지 {start_page} → 직접 이동: {jump_url}")
-        try:
-            page.goto(jump_url, wait_until="domcontentloaded", timeout=30000)
-        except Exception as e:
-            log(f"[{board_name}] 직접 이동 실패: {e}")
-        page.wait_for_timeout(4000)
-    else:
-        ensure_board(page, BOARDS[board_idx]["selector"], board_url, timeout_sec=20)
-        page.wait_for_timeout(2000)
-
+    # ── 게시판 진입 (항상 page 1부터 로드 후 버튼 클릭으로 점프) ──
+    ensure_board(page, BOARDS[board_idx]["selector"], board_url, timeout_sec=20)
+    page.wait_for_timeout(2000)
     board_frame = page.frame_locator("iframe#down")
+
+    # start_page > 1 이면 '다음' 버튼 그룹 이동으로 target 페이지 도달
+    if start_page > 1:
+        log(f"[{board_name}] 시작 페이지 {start_page}로 점프 중...")
+        if not _goto_page(page, board_frame, start_page):
+            log(f"[{board_name}] 점프 실패 → page 1부터 수집")
+            page_num = 1
 
     while True:
         log(f"[{board_name}] 페이지 {page_num} 읽는 중...")
