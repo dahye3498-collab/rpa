@@ -269,10 +269,18 @@ def ensure_board(page, selector: str, url: str, timeout_sec: int = 30) -> bool:
 # ---------------------------------------------------------------------------
 # 수집 핵심 로직 (URL 직접 이동 방식 - 페이지 버튼 클릭 불필요)
 # ---------------------------------------------------------------------------
+def _get_iframe_frame(page):
+    """iframe#down 의 실제 Frame 객체 반환 (네비게이션용)"""
+    for frame in page.frames:
+        if frame.name == "down":
+            return frame
+    return None
+
+
 def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     """
-    &page=N 파라미터로 각 페이지 URL을 직접 이동.
-    버튼 클릭 방식 대신 URL 기반으로 안정적으로 페이지 순회.
+    iframe을 직접 페이지별 URL로 네비게이트.
+    메인 페이지(세션/쿠키)는 유지하면서 iframe만 페이지 이동.
     """
     log(f"[{board_name}] 수집 시작 (cutoff: {CUTOFF_DATE})")
     extracted     = []
@@ -280,17 +288,38 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     seen          = set()
     start = START_PAGE.get(board_name, 1)
     page_num      = start
-    MAX_EMPTY_PAGES = 3  # 연속 빈 페이지 허용 횟수
-    log(f"[{board_name}] {start}페이지부터 시작 (이전 페이지 스킵)")
+    MAX_EMPTY_PAGES = 3
+    log(f"[{board_name}] {start}페이지부터 시작")
 
     empty_streak = 0
 
+    # 메인 카페 페이지 먼저 로드 (iframe#down 생성)
+    try:
+        page.goto("https://cafe.daum.net/meetpeople", wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(3000)
+        # 첫 번째 게시판 진입 (iframe 활성화)
+        ensure_board(page, BOARDS[[b["name"] for b in BOARDS].index(board_name)]["selector"],
+                     board_url, timeout_sec=20)
+    except Exception as e:
+        log(f"[{board_name}] 초기 진입 오류: {e}")
+
     while True:
-        url = f"{board_url}&page={page_num}"
-        log(f"[{board_name}] 페이지 {page_num} 이동: {url}")
+        iframe_url = f"{board_url}&page={page_num}"
+        log(f"[{board_name}] 페이지 {page_num} 이동")
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
+            frame = _get_iframe_frame(page)
+            if frame:
+                frame.goto(iframe_url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(2000)
+            else:
+                # iframe 없으면 메인 페이지 재진입
+                log(f"[{board_name}] iframe 없음 → 재진입")
+                ensure_board(page, BOARDS[[b["name"] for b in BOARDS].index(board_name)]["selector"],
+                             board_url, timeout_sec=20)
+                frame = _get_iframe_frame(page)
+                if frame:
+                    frame.goto(iframe_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(2000)
         except Exception as e:
             log(f"[{board_name}] 페이지 이동 오류: {e}")
             break
