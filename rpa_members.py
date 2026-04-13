@@ -265,14 +265,47 @@ def ensure_board(page, selector: str, url: str, timeout_sec: int = 30) -> bool:
 # 수집 핵심 로직
 # ---------------------------------------------------------------------------
 def _click_next_group(page, board_frame) -> bool:
-    """'다음' 그룹 버튼 클릭. Frame JS 방식 사용."""
+    """
+    '다음' 그룹 버튼 클릭.
+    1) FrameLocator로 a.btn_next 클릭
+    2) FrameLocator로 has-text('다음') 클릭
+    3) Frame JS evaluate로 클래스·텍스트 복합 탐색
+    """
+    # 1) FrameLocator: Daum cafe 표준 다음 버튼 클래스
+    for sel in ["a.btn_next", "a.link_next", "a.next"]:
+        try:
+            btn = board_frame.locator(sel).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click()
+                time.sleep(3)
+                return True
+        except Exception:
+            pass
+
+    # 2) FrameLocator: 텍스트 '다음' 포함 링크
+    try:
+        btn = board_frame.locator("a:has-text('다음')").last
+        if btn.count() > 0 and btn.is_visible():
+            btn.click()
+            time.sleep(3)
+            return True
+    except Exception:
+        pass
+
+    # 3) Frame JS: 클래스 + 텍스트 복합 탐색
     board_real_frame = page.frame(name="down")
     if board_real_frame:
         try:
             clicked = board_real_frame.evaluate("""
                 () => {
+                    // 클래스 기반 탐색
+                    for (const cls of ['btn_next', 'link_next', 'next']) {
+                        const el = document.querySelector('a.' + cls);
+                        if (el) { el.click(); return true; }
+                    }
+                    // 텍스트 기반 탐색 (부분 일치)
                     const links = Array.from(document.querySelectorAll('a'));
-                    const btn = links.find(a => a.innerText.trim() === '다음');
+                    const btn = links.find(a => a.innerText.trim().includes('다음'));
                     if (btn) { btn.click(); return true; }
                     return false;
                 }
@@ -313,6 +346,13 @@ def _goto_page(page, board_frame, target: int) -> bool:
     """
     if target <= 1:
         return True
+
+    # 페이지네이션 버튼이 로드될 때까지 대기
+    try:
+        board_frame.locator("a.link_num").first.wait_for(timeout=10000)
+    except Exception:
+        pass
+    time.sleep(1)
 
     log(f"페이지 {target}까지 점프 시작...")
     max_hops = target // 10 + 3   # 충분한 여유
@@ -360,7 +400,17 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     # start_page > 1 이면 '다음' 버튼 그룹 이동으로 target 페이지 도달
     if start_page > 1:
         log(f"[{board_name}] 시작 페이지 {start_page}로 점프 중...")
-        if not _goto_page(page, board_frame, start_page):
+        if _goto_page(page, board_frame, start_page):
+            # 점프 성공 여부 검증: 첫 글 날짜 출력
+            try:
+                for row in board_frame.locator("tr").all():
+                    if row.locator("a.txt_item").count() > 0:
+                        d = row.locator("span.tbl_txt_date").inner_text().strip()
+                        log(f"[{board_name}] 점프 후 첫 글 날짜: '{d}' (page {page_num})")
+                        break
+            except Exception:
+                pass
+        else:
             log(f"[{board_name}] 점프 실패 → page 1부터 수집")
             page_num = 1
 
