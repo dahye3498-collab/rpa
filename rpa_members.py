@@ -269,13 +269,13 @@ def ensure_board(page, selector: str, url: str, timeout_sec: int = 30) -> bool:
 # ---------------------------------------------------------------------------
 # 수집 핵심 로직
 # ---------------------------------------------------------------------------
-def _next_page(board_frame, page_num: int) -> bool:
+def _next_page(page, board_frame, page_num: int) -> bool:
     """
     다음 페이지로 이동. 성공하면 True.
-    1) 숫자 버튼 직접 클릭
-    2) JS로 '다음' 텍스트 링크 탐색·클릭
+    1) 숫자 버튼 직접 클릭 (FrameLocator)
+    2) 실제 Frame 객체로 JS 실행해서 '다음' 버튼 클릭
     """
-    # 1) 숫자 버튼
+    # 1) 숫자 버튼 클릭 (FrameLocator)
     try:
         btn = board_frame.locator(f"a.link_num:has-text('{page_num + 1}')").first
         if btn.count() > 0 and btn.is_visible():
@@ -285,21 +285,27 @@ def _next_page(board_frame, page_num: int) -> bool:
     except Exception:
         pass
 
-    # 2) JS로 '다음' 버튼 탐색
-    try:
-        clicked = board_frame.evaluate("""
-            () => {
-                const links = Array.from(document.querySelectorAll('a'));
-                const btn = links.find(a => a.innerText.trim() === '다음');
-                if (btn) { btn.click(); return true; }
-                return false;
-            }
-        """)
-        if clicked:
-            time.sleep(3)
-            return True
-    except Exception:
-        pass
+    # 2) 실제 Frame 객체로 JS 실행 → '다음' 버튼 클릭
+    # FrameLocator는 .evaluate() 없음 → page.frames에서 실제 Frame 찾기
+    board_real_frame = next(
+        (f for f in page.frames if "bbs_list" in f.url or "Mbmh" in f.url),
+        None
+    )
+    if board_real_frame:
+        try:
+            clicked = board_real_frame.evaluate("""
+                () => {
+                    const links = Array.from(document.querySelectorAll('a'));
+                    const btn = links.find(a => a.innerText.trim() === '다음');
+                    if (btn) { btn.click(); return true; }
+                    return false;
+                }
+            """)
+            if clicked:
+                time.sleep(3)
+                return True
+        except Exception:
+            pass
 
     return False
 
@@ -387,7 +393,7 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
         extracted.extend(_visit_posts(page, board_frame, board_name, page_posts))
 
         # 다음 페이지 이동
-        if not _next_page(board_frame, page_num):
+        if not _next_page(page, board_frame, page_num):
             log(f"[{board_name}] 마지막 페이지 (p{page_num}) → 종료")
             break
         page_num += 1
