@@ -316,12 +316,24 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     extracted     = []
     existing_keys = load_existing_keys(board_name)
     seen          = set()
-    page_num      = 1
+    start_page    = START_PAGE.get(board_name, 1)
+    page_num      = start_page
     board_idx     = [b["name"] for b in BOARDS].index(board_name)
 
-    # 게시판 진입
-    ensure_board(page, BOARDS[board_idx]["selector"], board_url, timeout_sec=20)
-    page.wait_for_timeout(2000)
+    # ── 게시판 진입 ──
+    # start_page > 1 이면 URL에 &page=N 붙여 바로 해당 페이지로 이동
+    if start_page > 1:
+        jump_url = board_url.rstrip("&") + f"&page={start_page}"
+        log(f"[{board_name}] 시작 페이지 {start_page} → 직접 이동: {jump_url}")
+        try:
+            page.goto(jump_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            log(f"[{board_name}] 직접 이동 실패: {e}")
+        page.wait_for_timeout(4000)
+    else:
+        ensure_board(page, BOARDS[board_idx]["selector"], board_url, timeout_sec=20)
+        page.wait_for_timeout(2000)
+
     board_frame = page.frame_locator("iframe#down")
 
     while True:
