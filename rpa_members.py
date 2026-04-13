@@ -292,7 +292,7 @@ def _dump_pagination_html(page) -> str:
 def _click_next_group(page, board_frame) -> bool:
     """
     '다음' 그룹 버튼 클릭.
-    실제 Frame JS로 페이지네이션 HTML을 확인한 뒤 클릭.
+    Daum cafe 페이지네이션 구조: div.paging_g > button.btn_g (button 태그!)
     """
     real_frame = page.frame(name="down")
     if not real_frame:
@@ -300,29 +300,38 @@ def _click_next_group(page, board_frame) -> bool:
     try:
         result = real_frame.evaluate("""
             () => {
-                // 1) 클래스 기반 (Daum cafe 알려진 패턴들)
-                const cls_candidates = ['btn_next', 'link_next', 'next', 'btn-next',
-                                        'page_next', 'paging_next', 'ico_next'];
-                for (const cls of cls_candidates) {
-                    const el = document.querySelector('a.' + cls);
-                    if (el) { el.click(); return 'OK:class=' + cls; }
+                // Daum cafe: button.btn_g 계열 탐색 (a 태그 아님!)
+                const btn_candidates = [
+                    'button.btn_g_next', 'button.btn_next', 'button.next',
+                    'button[class*="next"]', 'button[class*="btn_g"]'
+                ];
+                for (const sel of btn_candidates) {
+                    const el = document.querySelector(sel);
+                    if (el && !el.disabled) { el.click(); return 'OK:' + sel; }
                 }
-                // 2) 텍스트 완전/부분 일치 (innerText, textContent 모두 시도)
-                for (const a of document.querySelectorAll('a')) {
-                    const t = (a.innerText || a.textContent || '').trim();
-                    if (t === '다음' || t === '다음 페이지') {
-                        a.click(); return 'OK:text=' + t;
-                    }
-                }
-                // 3) title 속성
-                const byTitle = document.querySelector('a[title*="다음"]');
-                if (byTitle) { byTitle.click(); return 'OK:title'; }
 
-                // 실패 시 디버그 정보 반환
-                const links = Array.from(document.querySelectorAll('a'));
-                return 'FAIL|' + links.map(a =>
-                    a.className + ':' + (a.innerText||a.textContent||'').trim().substring(0,10)
-                ).join('||');
+                // 페이지네이션 영역 내 모든 button 확인
+                const paging = document.querySelector('.paging_g, .inner_paging_number, .list_paging');
+                if (paging) {
+                    for (const btn of paging.querySelectorAll('button')) {
+                        const t = (btn.innerText || btn.textContent || '').trim();
+                        const cls = btn.className || '';
+                        if (!btn.disabled && (t.includes('다음') || cls.includes('next'))) {
+                            btn.click(); return 'OK:paging_btn cls=' + cls;
+                        }
+                    }
+                    // disabled 포함 전체 button 목록 반환 (디버그)
+                    const btns = Array.from(paging.querySelectorAll('button'));
+                    return 'FAIL_PAGING|' + btns.map(b =>
+                        '[cls=' + b.className + ' txt=' + (b.innerText||'').trim().substring(0,10) + ' dis=' + b.disabled + ']'
+                    ).join('|');
+                }
+
+                // paging 컨테이너 없으면 전체 button 목록
+                const allBtns = Array.from(document.querySelectorAll('button'));
+                return 'FAIL_ALL|' + allBtns.map(b =>
+                    '[cls=' + b.className + ' txt=' + (b.innerText||'').trim().substring(0,10) + ']'
+                ).join('|');
             }
         """)
         if result and result.startswith("OK:"):
@@ -330,7 +339,7 @@ def _click_next_group(page, board_frame) -> bool:
             time.sleep(3)
             return True
         else:
-            log(f"[DEBUG 다음버튼] {str(result)[:300]}")
+            log(f"[DEBUG 다음버튼] {str(result)[:400]}")
     except Exception as e:
         log(f"[DEBUG 다음버튼 오류] {e}")
     return False
