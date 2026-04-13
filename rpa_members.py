@@ -269,18 +269,9 @@ def ensure_board(page, selector: str, url: str, timeout_sec: int = 30) -> bool:
 # ---------------------------------------------------------------------------
 # 수집 핵심 로직 (URL 직접 이동 방식 - 페이지 버튼 클릭 불필요)
 # ---------------------------------------------------------------------------
-def _get_iframe_frame(page):
-    """iframe#down 의 실제 Frame 객체 반환 (네비게이션용)"""
-    for frame in page.frames:
-        if frame.name == "down":
-            return frame
-    return None
-
-
 def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     """
-    iframe을 직접 페이지별 URL로 네비게이트.
-    메인 페이지(세션/쿠키)는 유지하면서 iframe만 페이지 이동.
+    iframe src를 JS로 직접 변경하여 페이지 순회.
     """
     log(f"[{board_name}] 수집 시작 (cutoff: {CUTOFF_DATE})")
     extracted     = []
@@ -291,37 +282,23 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     MAX_EMPTY_PAGES = 3
     log(f"[{board_name}] {start}페이지부터 시작")
 
-    empty_streak = 0
+    # 게시판 초기 진입
+    ensure_board(page,
+                 BOARDS[[b["name"] for b in BOARDS].index(board_name)]["selector"],
+                 board_url, timeout_sec=20)
+    page.wait_for_timeout(2000)
 
-    # 메인 카페 페이지 먼저 로드 (iframe#down 생성)
-    try:
-        page.goto("https://cafe.daum.net/meetpeople", wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(3000)
-        # 첫 번째 게시판 진입 (iframe 활성화)
-        ensure_board(page, BOARDS[[b["name"] for b in BOARDS].index(board_name)]["selector"],
-                     board_url, timeout_sec=20)
-    except Exception as e:
-        log(f"[{board_name}] 초기 진입 오류: {e}")
+    empty_streak = 0
 
     while True:
         iframe_url = f"{board_url}&page={page_num}"
         log(f"[{board_name}] 페이지 {page_num} 이동")
         try:
-            frame = _get_iframe_frame(page)
-            if frame:
-                frame.goto(iframe_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(2000)
-            else:
-                # iframe 없으면 메인 페이지 재진입
-                log(f"[{board_name}] iframe 없음 → 재진입")
-                ensure_board(page, BOARDS[[b["name"] for b in BOARDS].index(board_name)]["selector"],
-                             board_url, timeout_sec=20)
-                frame = _get_iframe_frame(page)
-                if frame:
-                    frame.goto(iframe_url, wait_until="domcontentloaded", timeout=30000)
-                    page.wait_for_timeout(2000)
+            # iframe src를 JS로 직접 변경 → 프레임 네비게이트
+            page.evaluate(f"document.getElementById('down').src = '{iframe_url}'")
+            page.wait_for_timeout(3000)
         except Exception as e:
-            log(f"[{board_name}] 페이지 이동 오류: {e}")
+            log(f"[{board_name}] iframe 이동 오류: {e}")
             break
 
         board_frame = page.frame_locator("iframe#down")
@@ -352,14 +329,16 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
                 if row.locator("a.txt_item").count() == 0:
                     continue
                 d = row.locator("span.tbl_txt_date").inner_text().strip()
+                title_sample = row.locator("a.txt_item").inner_text().strip()[:15]
                 if d:
                     first_date = parse_date(d).date()
+                    log(f"[{board_name}] 페이지 {page_num} 첫 글: '{title_sample}' / 날짜원문: '{d}' / 파싱: {first_date}")
                     break
             except Exception:
                 continue
 
         if first_date and first_date < CUTOFF_DATE:
-            log(f"[{board_name}] 페이지 {page_num} 첫 글 날짜 {first_date} < cutoff → 수집 종료")
+            log(f"[{board_name}] 페이지 {page_num} cutoff 이전 → 수집 종료")
             break
 
         page_posts = []
