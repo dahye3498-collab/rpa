@@ -5,3 +5,4 @@ __pycache__/
 .claude/
 .vscode/
 visionmeat/
+browser_session/

@@ -22,8 +22,9 @@ load_dotenv()
 LOGIN_EMAIL = os.getenv("LOGIN_EMAIL")
 LOGIN_PWD   = os.getenv("LOGIN_PWD")
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_DIR   = os.path.join(BASE_DIR, "visionmeat", "database")
+BASE_DIR     = os.path.dirname(os.path.abspath(__file__))
+DB_DIR       = os.path.join(BASE_DIR, "visionmeat", "database")
+SESSION_DIR  = os.path.join(BASE_DIR, "browser_session")   # 로그인 세션 캐시
 
 # 수집 cutoff (이 날짜 이전 글은 수집 안 함)
 CUTOFF_DATE = datetime(2021, 1, 1).date()
@@ -638,9 +639,15 @@ def run_rpa_members(credentials=None):
 
     with sync_playwright() as p:
         is_server = os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
-        browser   = p.chromium.launch(headless=bool(is_server))
-        context   = browser.new_context(viewport={"width": 1280, "height": 1024})
-        page      = context.new_page()
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        # persistent context: 쿠키/세션을 SESSION_DIR에 저장 → 재실행 시 로그인 스킵
+        context = p.chromium.launch_persistent_context(
+            SESSION_DIR,
+            headless=bool(is_server),
+            viewport={"width": 1280, "height": 1024},
+            args=["--disable-blink-features=AutomationControlled"],
+        )
+        page = context.pages[0] if context.pages else context.new_page()
 
         log("다음 카페 접속 중...")
         try:
@@ -748,7 +755,7 @@ def run_rpa_members(credentials=None):
                 log("저장할 신규 데이터 없음.")
         finally:
             try:
-                browser.close()
+                context.close()   # persistent context는 browser 대신 context.close()
             except Exception:
                 pass
 
