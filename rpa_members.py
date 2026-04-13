@@ -29,11 +29,11 @@ DB_DIR   = os.path.join(BASE_DIR, "visionmeat", "database")
 CUTOFF_DATE = datetime(2021, 1, 1).date()
 
 # 게시판별 시작 페이지
-# page25도 2017년 → 기존 2024-04 데이터가 page1~3 수준으로 추정
-# resume 로직이 기존 데이터 스킵하므로 1페이지부터 시작해도 빠름
+# 등업신청: 80페이지 = 2024년 9월 경계 (여기서부터 2021년까지 수집)
+# 회원정보: 1페이지부터 (건수 적어서 빠름)
 START_PAGE = {
     "회원정보": 1,
-    "등업신청": 1,
+    "등업신청": 80,
 }
 
 BOARDS = [
@@ -286,11 +286,8 @@ def _next_page(page, board_frame, page_num: int) -> bool:
         pass
 
     # 2) 실제 Frame 객체로 JS 실행 → '다음' 버튼 클릭
-    # FrameLocator는 .evaluate() 없음 → page.frames에서 실제 Frame 찾기
-    board_real_frame = next(
-        (f for f in page.frames if "bbs_list" in f.url or "Mbmh" in f.url),
-        None
-    )
+    # iframe name="down" 확인됨 → page.frame(name="down")으로 직접 접근
+    board_real_frame = page.frame(name="down")
     if board_real_frame:
         try:
             clicked = board_real_frame.evaluate("""
