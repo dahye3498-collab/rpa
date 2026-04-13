@@ -453,28 +453,49 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
             log(f"[{board_name}] 목록 없음 → 종료")
             break
 
-        rows = board_frame.locator("tr").all()
-        if not rows:
+        # ── JS evaluate로 한번에 읽기 (타이밍 이슈 방지) ──
+        real_frame = page.frame(name="down")
+        if not real_frame:
+            log(f"[{board_name}] iframe 접근 실패 → 종료")
             break
 
-        # 첫 일반 글 날짜로 cutoff 판단
+        post_items = real_frame.evaluate("""
+            () => {
+                const rows = Array.from(document.querySelectorAll('tr'));
+                return rows
+                    .filter(row => {
+                        const link = row.querySelector('a.txt_item');
+                        if (!link) return false;
+                        const cls = row.className || '';
+                        const txt = row.innerText || '';
+                        if (/ico_notice|txt_notice|txt_pill/.test(row.innerHTML)) return false;
+                        if (txt.includes('공지') || txt.includes('필독')) return false;
+                        return true;
+                    })
+                    .map(row => {
+                        const link = row.querySelector('a.txt_item');
+                        const dateEl = row.querySelector('span.tbl_txt_date');
+                        return {
+                            title: link.innerText.trim(),
+                            href:  link.getAttribute('href') || '',
+                            date:  dateEl ? dateEl.innerText.trim() : ''
+                        };
+                    });
+            }
+        """)
+
+        if not post_items:
+            log(f"[{board_name}] 목록 없음 → 종료")
+            break
+
+        # 첫 글 날짜로 cutoff 판단
         first_date = None
-        for row in rows:
-            try:
-                row_text = row.inner_text()
-                if row.locator(".ico_notice,.txt_notice,.txt_pill").count() > 0:
-                    continue
-                if "공지" in row_text or "필독" in row_text:
-                    continue
-                if row.locator("a.txt_item").count() == 0:
-                    continue
-                d = row.locator("span.tbl_txt_date").inner_text().strip()
-                if d:
-                    first_date = parse_date(d).date()
-                    log(f"[{board_name}] p{page_num} 첫 글 날짜: '{d}' → {first_date}")
-                    break
-            except Exception:
-                continue
+        for item in post_items:
+            d = item.get("date", "")
+            if d:
+                first_date = parse_date(d).date()
+                log(f"[{board_name}] p{page_num} 첫 글 날짜: '{d}' → {first_date}")
+                break
 
         if first_date and first_date < CUTOFF_DATE:
             log(f"[{board_name}] cutoff 도달 → 종료")
@@ -482,18 +503,11 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
 
         # 수집 대상 글 목록
         page_posts = []
-        for row in rows:
+        for item in post_items:
             try:
-                row_text = row.inner_text()
-                if row.locator(".ico_notice,.txt_notice,.txt_pill").count() > 0:
-                    continue
-                if "공지" in row_text or "필독" in row_text:
-                    continue
-                link_loc = row.locator("a.txt_item")
-                if link_loc.count() == 0:
-                    continue
-                title    = link_loc.inner_text().strip()
-                date_str = row.locator("span.tbl_txt_date").inner_text().strip()
+                title    = item.get("title", "")
+                date_str = item.get("date", "")
+                href     = item.get("href", "")
                 p_date   = parse_date(date_str).date()
                 if p_date < CUTOFF_DATE:
                     continue
@@ -501,7 +515,6 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
                 if key in seen or key in existing_keys:
                     continue
                 seen.add(key)
-                href = link_loc.get_attribute("href") or ""
                 page_posts.append({"title": title, "date": date_str, "href": href})
             except Exception:
                 continue
