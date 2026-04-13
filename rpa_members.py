@@ -28,9 +28,13 @@ DB_DIR   = os.path.join(BASE_DIR, "visionmeat", "database")
 # 수집 cutoff (이 날짜 이전 글은 수집 안 함)
 CUTOFF_DATE = datetime(2024, 3, 1).date()
 
-# 시작 페이지 (이미 수집된 페이지 건너뛰기용)
-# 현재 약 1905건 ÷ 15건/페이지 ≈ 127페이지 이미 수집됨 → 120부터 시작
-START_PAGE = 120
+# 게시판별 시작 페이지 (이미 수집된 페이지 건너뛰기용)
+# 회원정보: 148건 ÷ 15건/페이지 ≈ 10페이지 → 5페이지부터 (여유 있게)
+# 등업신청: 1905건 ÷ 15건/페이지 ≈ 127페이지 → 120페이지부터
+START_PAGE = {
+    "회원정보": 5,
+    "등업신청": 120,
+}
 
 BOARDS = [
     {
@@ -274,9 +278,10 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     extracted     = []
     existing_keys = load_existing_keys(board_name)
     seen          = set()
-    page_num      = START_PAGE
+    start = START_PAGE.get(board_name, 1)
+    page_num      = start
     MAX_EMPTY_PAGES = 3  # 연속 빈 페이지 허용 횟수
-    log(f"[{board_name}] {START_PAGE}페이지부터 시작 (이전 페이지 스킵)")
+    log(f"[{board_name}] {start}페이지부터 시작 (이전 페이지 스킵)")
 
     empty_streak = 0
 
@@ -309,9 +314,26 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
             log(f"[{board_name}] 마지막 페이지 (페이지 {page_num})")
             break
 
-        consecutive_old = 0
-        page_posts = []
+        # ✅ 페이지 첫 번째 일반 글 날짜로 cutoff 판단 (공지 제외)
+        first_date = None
+        for row in rows:
+            try:
+                if row.locator(".ico_notice, .txt_notice, .txt_pill").count() > 0:
+                    continue
+                if row.locator("a.txt_item").count() == 0:
+                    continue
+                d = row.locator("span.tbl_txt_date").inner_text().strip()
+                if d:
+                    first_date = parse_date(d).date()
+                    break
+            except Exception:
+                continue
 
+        if first_date and first_date < CUTOFF_DATE:
+            log(f"[{board_name}] 페이지 {page_num} 첫 글 날짜 {first_date} < cutoff → 수집 종료")
+            break
+
+        page_posts = []
         for row in rows:
             try:
                 is_notice = (
@@ -329,31 +351,23 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
                 p_date   = parse_date(date_str).date()
 
                 if p_date < CUTOFF_DATE:
-                    consecutive_old += 1
-                    if consecutive_old >= 5:
-                        log(f"[{board_name}] cutoff 이전 글 5개 연속 → 수집 종료 ({date_str})")
-                        break
                     continue
 
-                consecutive_old = 0
                 key = (title, date_str)
                 if key in seen:
                     continue
                 seen.add(key)
                 if key in existing_keys:
-                    log(f"[{board_name}] 스킵(기존): {title[:20]}")
                     continue
 
-                # href 추출 → 백그라운드 fetch용
                 href = link_loc.get_attribute("href") or ""
                 page_posts.append({"title": title, "date": date_str, "href": href})
             except Exception:
                 continue
 
+        if page_posts:
+            log(f"[{board_name}] 페이지 {page_num}: {len(page_posts)}건 신규")
         extracted.extend(_visit_posts(page, board_frame, board_name, page_posts))
-
-        if consecutive_old >= 5:
-            break
 
         page_num += 1
         time.sleep(3)
@@ -660,16 +674,24 @@ def run_rpa_members(credentials=None):
         try:
             for b in BOARDS:
                 log(f"\n{'='*60}\n[{b['name']}] 게시판 수집 시작\n{'='*60}")
-                all_data[b["name"]] = extract_all_posts_text(page, b["url"], b["name"])
+                rows = extract_all_posts_text(page, b["url"], b["name"])
+                all_data[b["name"]] = rows
                 # ✅ 게시판 하나 끝날 때마다 즉시 저장
-                log(f"[{b['name']}] 수집 완료 → 중간 저장 중...")
+                log(f"[{b['name']}] 수집 완료 → 저장 중...")
                 save_excel(all_data)
         except KeyboardInterrupt:
-            log("\n[!] 사용자 중단 감지 → 지금까지 수집된 데이터 저장 중...")
-            if all_data:
+            log("\n[!] 중단 감지 → 수집된 데이터 저장 중...")
+            # all_data에 현재까지 완료된 게시판 데이터가 있으면 저장
+            any_rows = any(len(v) > 0 for v in all_data.values())
+            if any_rows:
+                try:
+                    browser.close()
+                except Exception:
+                    pass
                 save_excel(all_data)
             else:
-                log("저장할 데이터 없음.")
+                log("저장할 신규 데이터 없음.")
+            return
         finally:
             try:
                 browser.close()
