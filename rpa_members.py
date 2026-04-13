@@ -611,13 +611,22 @@ def save_excel(all_data: dict):
             df_new   = pd.DataFrame(new_rows, columns=COLS[board_name]) if new_rows else pd.DataFrame(columns=COLS[board_name])
             df_exist = existing.get(board_name, pd.DataFrame(columns=COLS[board_name]))
 
+            # ── 디버그: df_new 실제 내용 확인 ──
+            if board_name == "등업신청" and len(df_new) > 0:
+                d_debug = "작성일"
+                log(f"[DEBUG] df_new {len(df_new)}건 / 작성일 앞3: {df_new[d_debug].head(3).tolist()} / 뒤3: {df_new[d_debug].tail(3).tolist()}")
+                date_only_new = df_new[~df_new[d_debug].astype(str).str.contains(":", na=False)][d_debug]
+                log(f"[DEBUG] df_new 날짜범위: {date_only_new.min()} ~ {date_only_new.max()} / 날짜형 {len(date_only_new)}건")
+
             df_combined = pd.concat([df_exist, df_new], ignore_index=True)
 
             # 제목+작성일 기준 중복 제거 (기존 우선)
             t_col = next((c for c in df_combined.columns if "제목" in str(c)), None)
             d_col = next((c for c in df_combined.columns if "작성일" in str(c)), None)
             if t_col and d_col:
+                before = len(df_combined)
                 df_combined = df_combined.drop_duplicates(subset=[t_col, d_col], keep="first")
+                log(f"[DEBUG] dedup: {before} → {len(df_combined)} (제거 {before - len(df_combined)}건)")
 
             df_combined.to_excel(writer, sheet_name=board_name, index=False)
             log(f"[{board_name}] 기존 {len(df_exist)}건 + 신규 {len(df_new)}건 = 총 {len(df_combined)}건")
