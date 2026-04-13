@@ -300,10 +300,12 @@ def _click_next_group(page, board_frame) -> bool:
     try:
         result = real_frame.evaluate("""
             () => {
-                // Daum cafe: button.btn_g 계열 탐색 (a 태그 아님!)
+                // Daum cafe 확인된 구조: button.btn_g_ico.btn_item.btn_next
                 const btn_candidates = [
-                    'button.btn_g_next', 'button.btn_next', 'button.next',
-                    'button[class*="next"]', 'button[class*="btn_g"]'
+                    'button.btn_item.btn_next',
+                    'button.btn_g_ico.btn_item.btn_next',
+                    'button[class*="btn_next"]',
+                    'button[class*="next"]'
                 ];
                 for (const sel of btn_candidates) {
                     const el = document.querySelector(sel);
