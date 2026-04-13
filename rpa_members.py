@@ -324,7 +324,10 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
         first_date = None
         for row in rows:
             try:
+                row_text = row.inner_text()
                 if row.locator(".ico_notice, .txt_notice, .txt_pill").count() > 0:
+                    continue
+                if "공지" in row_text or "필독" in row_text:
                     continue
                 if row.locator("a.txt_item").count() == 0:
                     continue
