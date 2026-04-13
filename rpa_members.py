@@ -269,9 +269,19 @@ def ensure_board(page, selector: str, url: str, timeout_sec: int = 30) -> bool:
 # ---------------------------------------------------------------------------
 # 수집 핵심 로직 (URL 직접 이동 방식 - 페이지 버튼 클릭 불필요)
 # ---------------------------------------------------------------------------
+def _find_board_frame(page, board_url: str):
+    """page.frames에서 게시판 Frame 객체 찾기"""
+    fldid = board_url.split("fldid=")[-1].split("&")[0]
+    for frame in page.frames:
+        if fldid in frame.url or "bbs_list" in frame.url:
+            return frame
+    return None
+
+
 def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     """
-    iframe src를 JS로 직접 변경하여 페이지 순회.
+    Frame 객체를 직접 사용하여 페이지 순회.
+    frame.goto()로 페이지 이동, frame.locator()로 요소 접근.
     """
     log(f"[{board_name}] 수집 시작 (cutoff: {CUTOFF_DATE})")
     extracted     = []
@@ -282,11 +292,18 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
     MAX_EMPTY_PAGES = 3
     log(f"[{board_name}] {start}페이지부터 시작")
 
-    # 게시판 초기 진입
+    # 게시판 초기 진입 (Frame 활성화)
     ensure_board(page,
                  BOARDS[[b["name"] for b in BOARDS].index(board_name)]["selector"],
                  board_url, timeout_sec=20)
     page.wait_for_timeout(2000)
+
+    # Frame 객체 확보
+    frame = _find_board_frame(page, board_url)
+    if not frame:
+        log(f"[{board_name}] 게시판 Frame 못 찾음 - 전체 frames: {[f.url for f in page.frames]}")
+        return []
+    log(f"[{board_name}] Frame 확보: {frame.url[:60]}")
 
     empty_streak = 0
 
@@ -294,14 +311,14 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
         iframe_url = f"{board_url}&page={page_num}"
         log(f"[{board_name}] 페이지 {page_num} 이동")
         try:
-            # iframe src를 JS로 직접 변경 → 프레임 네비게이트
-            page.evaluate(f"document.getElementById('down').src = '{iframe_url}'")
-            page.wait_for_timeout(3000)
+            frame.goto(iframe_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
         except Exception as e:
-            log(f"[{board_name}] iframe 이동 오류: {e}")
+            log(f"[{board_name}] 페이지 이동 오류: {e}")
             break
 
-        board_frame = page.frame_locator("iframe#down")
+        # Frame 직접 사용 (frame_locator 대신)
+        board_frame = frame
 
         try:
             board_frame.locator("a.txt_item").first.wait_for(timeout=10000)
@@ -378,7 +395,7 @@ def extract_all_posts_text(page, board_url: str, board_name: str) -> list:
 
         if page_posts:
             log(f"[{board_name}] 페이지 {page_num}: {len(page_posts)}건 신규")
-        extracted.extend(_visit_posts(page, board_frame, board_name, page_posts))
+        extracted.extend(_visit_posts(page, frame, board_name, page_posts))
 
         page_num += 1
         time.sleep(3)
