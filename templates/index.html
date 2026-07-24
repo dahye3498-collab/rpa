@@ -760,16 +760,19 @@ function applyProgress(p) {
   const ndMain = document.getElementById("nd-main");
   const ndSub  = document.getElementById("nd-sub");
 
+  const TEXT_BOARDS_SET = new Set(["구매", "판매", "회원정보", "등업신청"]);
   if (p.phase === "capturing") {
+    const isText = p.current_board && TEXT_BOARDS_SET.has(p.current_board);
     ndBox.style.display = "";
-    ndIcon.textContent = "📸";
+    ndIcon.textContent = isText ? "📝" : "📸";
     const dateStr = p.total_dates > 0
       ? `날짜 ${pill(p.current_date_index + "/" + p.total_dates)} `
       : (p.current_date ? `${p.current_date} ` : "");
     const boardStr = p.current_board
       ? `${p.current_board} 게시판 ${p.total_in_scope > 0 ? pill(p.current_index + "/" + p.total_in_scope) : ""} 수집 중`
       : "게시판 준비 중";
-    ndMain.innerHTML = `RPA 캡처  ${dateStr}${boardStr}`;
+    const modeLabel = isText ? "텍스트 수집" : "RPA 캡처";
+    ndMain.innerHTML = `${modeLabel}  ${dateStr}${boardStr}`;
     ndSub.textContent = p.current_date || "";
 
   } else if (p.phase === "ocr") {
@@ -814,14 +817,16 @@ function applyProgress(p) {
   }
 
   // 동시접속 배너 상세 업데이트
+  const capLabel = (p.phase === "capturing" && p.current_board && TEXT_BOARDS_SET.has(p.current_board))
+    ? "텍스트 수집 중" : phaseLabel(p.phase);
   document.getElementById("busy-detail").textContent =
-    `단계: ${phaseLabel(p.phase)}` + (p.current_date ? ` | 날짜: ${p.current_date}` : "")
+    `단계: ${capLabel}` + (p.current_date ? ` | 날짜: ${p.current_date}` : "")
     + (p.current_board ? ` | 게시판: ${p.current_board}` : "");
 }
 
 function phaseLabel(phase) {
   const map = {
-    idle: "대기중", capturing: "RPA 캡처 중", ocr: "OCR 분석 중",
+    idle: "대기중", capturing: "RPA 수집 중", ocr: "OCR 분석 중",
     finished: "완료", error: "오류"
   };
   return map[phase] || phase || "-";
@@ -975,14 +980,15 @@ async function loadResumeState() {
       return;
     }
 
+    const TEXT_BOARDS = new Set(["구매", "판매", "회원정보", "등업신청"]);
     let html = `<table class="resume-table">
       <thead><tr>
         <th>날짜</th>
-        <th>구매<br><small>캡처/OCR</small></th>
-        <th>판매<br><small>캡처/OCR</small></th>
+        <th>구매<br><small>텍스트</small></th>
+        <th>판매<br><small>텍스트</small></th>
         <th>품목표<br><small>캡처/OCR</small></th>
-        <th>회원정보<br><small>캡처/OCR</small></th>
-        <th>등업신청<br><small>캡처/OCR</small></th>
+        <th>회원정보<br><small>텍스트</small></th>
+        <th>등업신청<br><small>텍스트</small></th>
         <th style="width:60px"></th>
       </tr></thead><tbody>`;
 
@@ -1006,11 +1012,19 @@ async function loadResumeState() {
       html += `<td>${date}</td>`;
       for (const board of ["구매", "판매", "품목표", "회원정보", "등업신청"]) {
         const info = boards[board] || {};
+        const isTextBoard = TEXT_BOARDS.has(board);
         if (info.no_posts) {
           html += `<td><span class="not-done" style="color:#999">게시글없음</span></td>`;
         } else if (!info.rpa_done && !info.ocr_done) {
           html += `<td><span class="not-done">수집정보 없음</span></td>`;
+        } else if (isTextBoard) {
+          // 텍스트 게시판: Excel 저장 여부만 표시
+          const done = info.ocr_done
+            ? '<span class="done-ocr">✓ Excel 저장됨</span>'
+            : (info.rpa_done ? '<span class="done-rpa">✓ 텍스트 수집</span>' : '<span class="not-done">○ 미완</span>');
+          html += `<td>${done}</td>`;
         } else {
+          // 스크린샷 게시판 (품목표)
           const rpa = info.rpa_done
             ? '<span class="done-rpa">✓ 캡처</span>'
             : '<span class="not-done">○ 미완</span>';

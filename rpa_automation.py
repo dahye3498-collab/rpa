@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
+import pandas as pd
 
 load_dotenv()
 
@@ -23,6 +24,9 @@ DB_DIR = os.path.join(BASE_DIR, "visionmeat", "database")
 # Dynamic filename: YYMMDD_미트피플_데이터.xlsx
 OUTPUT_FILENAME = f"{datetime.now().strftime('%y%m%d')}_미트피플_데이터.xlsx"
 OUTPUT_PATH = os.path.join(DB_DIR, OUTPUT_FILENAME)
+
+# 텍스트만 추출하는 게시판 (스크린샷+OCR 대신 텍스트 복사 → Excel 직접 저장)
+TEXT_BOARDS = {"구매", "판매", "회원정보", "등업신청"}
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -50,7 +54,7 @@ def get_missing_dates() -> list:
     vision_meat_root = os.path.join(BASE_DIR, "visionmeat")
     os.makedirs(vision_meat_root, exist_ok=True)
 
-    CAPTURE_BOARDS = ["구매", "판매", "품목표"]
+    CAPTURE_BOARDS = ["구매", "판매", "품목표", "회원정보", "등업신청"]
 
     existing_dates = set()
     if os.path.isdir(vision_meat_root):
@@ -63,20 +67,31 @@ def get_missing_dates() -> list:
             except ValueError:
                 continue  # YYYY-MM-DD 형식이 아닌 폴더는 무시
 
-            # ✅ 핵심 수정: 폴더 존재 여부가 아닌 스크린샷 존재 여부로 판단
-            # 하나라도 스크린샷이 있으면 "캡처 완료" 날짜로 간주
-            has_any_screenshot = False
+            # 폴더 존재 여부가 아닌 실제 데이터 존재 여부로 판단
+            has_any_data = False
             for board in CAPTURE_BOARDS:
-                cap_dir = os.path.join(entry_path, board, "screenshots")
-                if os.path.isdir(cap_dir):
-                    if any(
-                        f.lower().endswith((".png", ".jpg", ".jpeg"))
-                        for f in os.listdir(cap_dir)
-                    ):
-                        has_any_screenshot = True
+                if board in TEXT_BOARDS:
+                    # 텍스트 게시판: text_data.json 또는 excel 존재 여부
+                    text_file = os.path.join(entry_path, board, "text_data", "text_data.json")
+                    excel_dir = os.path.join(entry_path, board, "excel")
+                    if os.path.exists(text_file):
+                        has_any_data = True
                         break
+                    if os.path.isdir(excel_dir) and any(f.endswith(".xlsx") for f in os.listdir(excel_dir)):
+                        has_any_data = True
+                        break
+                else:
+                    # 스크린샷 게시판 (품목표)
+                    cap_dir = os.path.join(entry_path, board, "screenshots")
+                    if os.path.isdir(cap_dir):
+                        if any(
+                            f.lower().endswith((".png", ".jpg", ".jpeg"))
+                            for f in os.listdir(cap_dir)
+                        ):
+                            has_any_data = True
+                            break
 
-            if has_any_screenshot:
+            if has_any_data:
                 existing_dates.add(d.date())
 
     today = datetime.now().date()
@@ -365,6 +380,144 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
 
     return captured_data
 
+def extract_board_posts_text(board_frame, board_name: str, text_dir: str, target_date: datetime = None) -> list:
+    """
+    텍스트 기반 게시판(구매/판매/회원정보/등업신청)에서 게시글 텍스트를 직접 추출합니다.
+    스크린샷 대신 텍스트를 복사하여 리스트로 반환합니다.
+    """
+    log(f"1단계: [{board_name}] 텍스트 수집을 시작합니다.")
+    os.makedirs(text_dir, exist_ok=True)
+
+    extracted_data = []
+    page_num = 1
+    stop_searching = False
+
+    while not stop_searching:
+        log(f"[{board_name}] 게시글 목록(페이지 {page_num}) 검사 중...")
+
+        try:
+            board_frame.locator("a.txt_item").first.wait_for(timeout=10000)
+        except:
+            log(f"[{board_name}] 게시글 목록을 찾을 수 없습니다. (데이터 없음)")
+            break
+
+        rows = board_frame.locator("tr").all()
+        if not rows:
+            break
+
+        consecutive_old_posts = 0
+        found_target_or_older = False
+        current_page_posts = []
+
+        for row in rows:
+            try:
+                is_notice = row.locator(".ico_notice, .txt_notice, .txt_pill").count() > 0 or \
+                            "공지" in row.inner_text() or "필독" in row.inner_text()
+                if is_notice:
+                    continue
+
+                link_loc = row.locator("a.txt_item")
+                if link_loc.count() > 0:
+                    title = link_loc.inner_text().strip()
+                    date_str = row.locator("span.tbl_txt_date").inner_text().strip()
+
+                    p_date = parse_date(date_str)
+                    collect_date = target_date.date() if target_date else datetime.now().date()
+
+                    if p_date.date() < collect_date:
+                        found_target_or_older = True
+                        consecutive_old_posts += 1
+                        if consecutive_old_posts >= 5:
+                            log(f"[{board_name}] 과거 글 5개 초과 발견으로 중단합니다. (날짜: {date_str})")
+                            stop_searching = True
+                            break
+                        continue
+
+                    if p_date.date() > collect_date:
+                        continue
+
+                    found_target_or_older = True
+                    consecutive_old_posts = 0
+
+                    current_page_posts.append({
+                        "title": title,
+                        "date": date_str,
+                    })
+            except:
+                continue
+
+        if not current_page_posts and not stop_searching:
+            if found_target_or_older:
+                log(f"[{board_name}] 현재 페이지에 대상 날짜 글이 없습니다.")
+                stop_searching = True
+            else:
+                log(f"[{board_name}] 대상 날짜 글이 아직 나오지 않음. 다음 페이지로 계속 탐색...")
+
+        for post in current_page_posts:
+            log(f"[{board_name}] 텍스트 추출 중: {post['title']}")
+            try:
+                post_link = board_frame.locator("a.txt_item").filter(has_text=post['title']).first
+                post_link.click()
+                time.sleep(4)
+
+                # 게시글 본문 텍스트 추출
+                content_text = ""
+                content_area = board_frame.locator("#user_contents")
+                if content_area.count() > 0:
+                    content_text = content_area.inner_text().strip()
+
+                # 작성자 추출 시도
+                author = ""
+                try:
+                    for sel in [".txt_sub .txt_item", ".nick_txt", ".article_writer"]:
+                        author_loc = board_frame.locator(sel).first
+                        if author_loc.count() > 0 and author_loc.is_visible():
+                            author = author_loc.inner_text().strip()
+                            if author:
+                                break
+                except:
+                    pass
+
+                extracted_data.append({
+                    "제목": post['title'],
+                    "작성자": author,
+                    "작성일": post['date'],
+                    "내용": content_text,
+                })
+                log(f"[{board_name}] 텍스트 추출 완료: {post['title']}")
+
+                # 목록으로 돌아가기
+                list_btn = board_frame.locator("#article-list-btn").or_(
+                    board_frame.get_by_role("link", name="목록", exact=True)
+                ).first
+                list_btn.click()
+                time.sleep(3)
+                board_frame.locator("a.txt_item").first.wait_for(timeout=10000)
+            except Exception as e:
+                log(f"[{board_name}] 게시글 '{post['title']}' 처리 중 오류: {e}")
+
+        if stop_searching:
+            break
+
+        # 다음 페이지 이동
+        next_pg = board_frame.locator(f"a.link_num:has-text('{page_num + 1}')").first
+        if next_pg.count() > 0 and next_pg.is_visible():
+            log(f"[{board_name}] 다음 페이지({page_num + 1})로 이동합니다.")
+            next_pg.click()
+            page_num += 1
+            time.sleep(5)
+        else:
+            break
+
+    # JSON으로 저장 (참조/백업용)
+    json_path = os.path.join(text_dir, "text_data.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(extracted_data, f, ensure_ascii=False, indent=2)
+
+    log(f"[{board_name}] 텍스트 수집 완료: {len(extracted_data)}건")
+    return extracted_data
+
+
 def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, credentials=None):
     """
     캡처 RPA를 실행합니다.
@@ -589,9 +742,32 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
                     continue
 
                 board_frame = page.frame_locator("iframe#down")
-                capture_dir = os.path.join(daily_dir, b["name"], "screenshots")
-                captured = capture_board_posts(board_frame, b["name"], capture_dir, target_date=target_date)
-                all_captured.extend(captured)
+
+                if b["name"] in TEXT_BOARDS:
+                    # 텍스트 게시판: 텍스트 추출 → Excel 직접 저장
+                    text_dir = os.path.join(daily_dir, b["name"], "text_data")
+                    text_data = extract_board_posts_text(board_frame, b["name"], text_dir, target_date=target_date)
+
+                    if text_data:
+                        excel_dir = os.path.join(daily_dir, b["name"], "excel")
+                        os.makedirs(excel_dir, exist_ok=True)
+                        df = pd.DataFrame(text_data)
+                        output_filename = f"{date_str.replace('-', '')}_{b['name']}_데이터.xlsx"
+                        df.to_excel(os.path.join(excel_dir, output_filename), index=False)
+                        # database 폴더에도 복사
+                        db_dir = os.path.join(vision_meat_root, "database")
+                        os.makedirs(db_dir, exist_ok=True)
+                        df.to_excel(os.path.join(db_dir, output_filename), index=False)
+                        log(f"[{b['name']}] Excel 저장 완료: {output_filename} ({len(text_data)}건)")
+
+                    captured_count = len(text_data)
+                    all_captured.extend([{"board": b["name"], "title": d["제목"], "date": d["작성일"]} for d in text_data])
+                else:
+                    # 품목표: 기존 스크린샷 캡처 (이후 OCR 분석 필요)
+                    capture_dir = os.path.join(daily_dir, b["name"], "screenshots")
+                    captured = capture_board_posts(board_frame, b["name"], capture_dir, target_date=target_date)
+                    captured_count = len(captured)
+                    all_captured.extend(captured)
 
                 if on_step:
                     on_step(
@@ -599,7 +775,7 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
                         info={
                             "date": date_str,
                             "board": b["name"],
-                            "captured_count": len(captured),
+                            "captured_count": captured_count,
                             "total_captured": len(all_captured),
                         },
                     )
@@ -611,8 +787,9 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
     if not all_captured:
         log("새롭게 수집된 데이터가 없습니다.")
     else:
-        log(f"총 {len(all_captured)}개의 게시글 캡처 완료.")
-        log("2단계: batch_processor.py를 실행하여 AI 분석을 진행하세요.")
+        log(f"총 {len(all_captured)}개의 게시글 수집 완료.")
+        log("텍스트 게시판(구매/판매/회원정보/등업신청)은 Excel 저장 완료.")
+        log("품목표는 batch_processor.py로 AI 분석을 진행하세요.")
 
 if __name__ == "__main__":
     run_rpa()
