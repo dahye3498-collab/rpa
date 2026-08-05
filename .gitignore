@@ -6,3 +6,6 @@ __pycache__/
 .vscode/
 visionmeat/
 browser_session/
+tmp_*.json
+date_check_result.txt
+diag_*.py
