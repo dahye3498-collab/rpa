@@ -10,11 +10,16 @@ VisionMeat RPA/OCR 제어 패널
 접속: http://localhost:5000  (같은 LAN의 다른 PC: http://서버IP:5000)
 """
 
+import os
+import re
 import json
-from flask import Flask, render_template, Response, request, jsonify
+from flask import Flask, render_template, Response, request, jsonify, send_from_directory, abort
 from flask_cors import CORS
 
 from job_manager import job_manager
+import product_search
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__)
 CORS(app)
@@ -25,6 +30,44 @@ CORS(app)
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/search")
+def search_page():
+    return render_template("search.html")
+
+
+# ── 품목 검색 API ────────────────────────────────────────────
+
+@app.route("/api/search")
+def api_search():
+    q = request.args.get("q", "").strip()
+    warehouse = request.args.get("warehouse", "").strip()
+    origin = request.args.get("origin", "").strip()
+    brand = request.args.get("brand", "").strip()
+    field = request.args.get("field", "품목").strip() or "품목"
+    res = product_search.search(q, warehouse, origin, brand, field, limit=1000)
+    return jsonify({
+        "count": res["count"],
+        "shown": len(res["results"]),
+        "results": res["results"],
+    })
+
+
+@app.route("/api/search_stats")
+def api_search_stats():
+    return jsonify(product_search.stats())
+
+
+@app.route("/screenshot/<date>/<path:filename>")
+def screenshot(date, filename):
+    """원본 품목표 스크린샷 서빙 (검색 결과 → 원본 대조용)."""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        abort(404)
+    d = os.path.join(BASE_DIR, "visionmeat", date, "품목표", "screenshots")
+    if not os.path.isdir(d):
+        abort(404)
+    return send_from_directory(d, filename)
 
 
 # ── SSE 스트림 ───────────────────────────────────────────────

@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>품목 검색 · VisionMeat</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --txt:#e6e9ef; --sub:#9aa3b2; --accent:#4f9dff; --hit:#ffd54a; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Malgun Gothic",sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  header .stat { color:var(--sub); font-size:13px; }
+  header a { color:var(--accent); font-size:13px; text-decoration:none; margin-left:auto; }
+  .wrap { padding:16px 20px; max-width:1200px; margin:0 auto; }
+  .searchbar { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:12px; }
+  input, select { background:var(--card); border:1px solid var(--line); color:var(--txt); border-radius:8px; padding:10px 12px; font-size:14px; }
+  input[type=text] { min-width:200px; }
+  #q { flex:1; min-width:220px; font-size:16px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:10px 18px; font-size:14px; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--sub); }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+  .chip { background:var(--card); border:1px solid var(--line); color:var(--sub); border-radius:14px; padding:5px 12px; font-size:13px; cursor:pointer; }
+  .chip:hover { color:var(--txt); border-color:var(--accent); }
+  .meta { color:var(--sub); font-size:13px; margin:8px 0; }
+  .tablewrap { overflow-x:auto; border:1px solid var(--line); border-radius:10px; }
+  table { border-collapse:collapse; width:100%; font-size:13.5px; white-space:nowrap; }
+  th,td { padding:9px 11px; border-bottom:1px solid var(--line); text-align:left; }
+  th { background:var(--card); color:var(--sub); position:sticky; top:0; font-weight:600; }
+  tr:hover td { background:#1d222b; }
+  td.item { font-weight:600; }
+  mark { background:transparent; color:var(--hit); font-weight:700; }
+  .wh { color:#7ee0a1; }
+  a.shot { color:var(--accent); text-decoration:none; }
+  .empty { color:var(--sub); padding:30px; text-align:center; }
+  .hint { color:var(--sub); font-size:12px; margin-top:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🥩 품목 검색</h1>
+  <span class="stat" id="stat">로딩…</span>
+  <a href="/">← 제어판</a>
+</header>
+
+<div class="wrap">
+  <div class="searchbar">
+    <input type="text" id="q" placeholder="품목 검색 (예: 끝갈비, 립앤드, 살치살)" autofocus>
+    <select id="field" title="검색 대상 필드">
+      <option value="품목">품목</option>
+      <option value="브랜드">브랜드</option>
+      <option value="전체">전체</option>
+    </select>
+    <input type="text" id="warehouse" placeholder="창고 필터 (예: 강동1)">
+    <input type="text" id="origin" placeholder="원산지 (예: 미국)">
+    <input type="text" id="brand" placeholder="브랜드 (예: EXCEL)">
+    <button id="go">검색</button>
+    <button class="ghost" id="clear">초기화</button>
+  </div>
+
+  <div class="chips">
+    <span class="chip" data-q="끝갈비">끝갈비/립앤드</span>
+    <span class="chip" data-q="살치살">살치살</span>
+    <span class="chip" data-q="부채살">부채살</span>
+    <span class="chip" data-q="아롱사태">아롱사태</span>
+    <span class="chip" data-q="차돌박이">차돌박이</span>
+    <span class="chip" data-q="등갈비">등갈비/백립</span>
+  </div>
+  <div class="hint">동의어·오독 자동 확장: "끝갈비" 검색 시 립앤드·립엔드·RIB END·갈갈비(오독)까지 매칭. 창고 강한1→강동1 보정. 결과의 [원본]으로 스크린샷 대조.</div>
+
+  <div class="meta" id="meta"></div>
+  <div class="tablewrap">
+    <table id="tbl">
+      <thead><tr>
+        <th>품목</th><th>창고</th><th>원산지</th><th>브랜드</th><th>등급</th><th>EST</th><th>판매가</th><th>업체</th><th>수집일</th><th>원본</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div class="empty" id="empty" style="display:none">검색 결과가 없어요. 다른 표기(립앤드/립엔드)나 전체 검색을 시도해 보세요.</div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let lastTerms = [];
+
+function esc(s){ return String(s??"").replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function hl(s){
+  s = esc(s);
+  for(const t of lastTerms){
+    if(!t) continue;
+    try{ s = s.replace(new RegExp('('+t.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>'); }catch(e){}
+  }
+  return s;
+}
+
+async function loadStats(){
+  try{
+    const r = await fetch('/api/search_stats'); const d = await r.json();
+    $('#stat').textContent = `${d.total_rows.toLocaleString()}품목 · ${d.vendor_count}업체 · ${d.dates.length}일치`;
+  }catch(e){ $('#stat').textContent=''; }
+}
+
+async function doSearch(){
+  const q = $('#q').value.trim();
+  const params = new URLSearchParams({
+    q, field:$('#field').value,
+    warehouse:$('#warehouse').value.trim(),
+    origin:$('#origin').value.trim(),
+    brand:$('#brand').value.trim(),
+  });
+  lastTerms = q ? q.split(/\s+/) : [];
+  $('#meta').textContent = '검색 중…';
+  const r = await fetch('/api/search?'+params.toString());
+  const d = await r.json();
+  const tb = $('#rows'); tb.innerHTML='';
+  if(!d.results.length){ $('#empty').style.display='block'; $('#tbl').style.display='none'; $('#meta').textContent = `0건`; return; }
+  $('#empty').style.display='none'; $('#tbl').style.display='';
+  $('#meta').textContent = `${d.count.toLocaleString()}건 매칭` + (d.count>d.shown?` (상위 ${d.shown}건 표시)`:'');
+  const frag = document.createDocumentFragment();
+  for(const it of d.results){
+    const tr = document.createElement('tr');
+    const shot = it.수집일 && it.파일명 ? `/screenshot/${encodeURIComponent(it.수집일)}/${encodeURIComponent(it.파일명)}` : '';
+    tr.innerHTML = `
+      <td class="item">${hl(it.품목)}</td>
+      <td class="wh">${esc(it.창고)}</td>
+      <td>${esc(it.원산지)}</td>
+      <td>${esc(it.브랜드)}</td>
+      <td>${esc(it.등급)}</td>
+      <td>${esc(it.EST)}</td>
+      <td>${esc(it.판매가_원)}</td>
+      <td>${esc(it.업체)}</td>
+      <td>${esc(it.수집일)}</td>
+      <td>${shot?`<a class="shot" href="${shot}" target="_blank">🔍원본</a>`:''}</td>`;
+    frag.appendChild(tr);
+  }
+  tb.appendChild(frag);
+}
+
+$('#go').onclick = doSearch;
+$('#clear').onclick = ()=>{ ['#q','#warehouse','#origin','#brand'].forEach(s=>$(s).value=''); $('#field').value='품목'; doSearch(); };
+$('#q').addEventListener('keydown', e=>{ if(e.key==='Enter') doSearch(); });
+['#warehouse','#origin','#brand'].forEach(s=>$(s).addEventListener('keydown',e=>{ if(e.key==='Enter') doSearch(); }));
+document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{ $('#q').value=c.dataset.q; doSearch(); });
+
+loadStats();
+</script>
+</body>
+</html>
