@@ -645,7 +645,8 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
         # 1. 브라우저 초기화 (한 번만 열고 날짜별로 반복)
         is_server = os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
         browser = p.chromium.launch(headless=bool(is_server))
-        context = browser.new_context(viewport={'width': 1280, 'height': 1024})
+        # device_scale_factor=2: 캡처 해상도 2배 → 표 글자 선명 (OCR 정확도 향상)
+        context = browser.new_context(viewport={'width': 1280, 'height': 1024}, device_scale_factor=2)
         page = context.new_page()
 
         log("다음 카페 접속 중...")

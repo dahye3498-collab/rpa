@@ -36,6 +36,12 @@ SOURCE_MAPPING_FILE = os.path.join(BASE_DIR, "[운영] 자동변환_소스데이
 RESIZE_IMAGES = os.getenv("RESIZE_IMAGES", "0").strip() == "1"
 MAX_IMG_SIZE = int(os.getenv("MAX_IMG_SIZE", "1280"))
 
+# 품목표 세로로 긴 이미지 자동 타일 분할 OCR 설정
+# (한 장 통째 OCR 시 API가 이미지를 축소해 환각·행 누락이 생기는 문제 방지)
+OCR_TILE_THRESHOLD = int(os.getenv("OCR_TILE_THRESHOLD", "1400"))  # 이 높이(px) 초과 시 분할
+OCR_TILE_HEIGHT = int(os.getenv("OCR_TILE_HEIGHT", "1500"))        # 밴드 1개 높이
+OCR_TILE_OVERLAP = int(os.getenv("OCR_TILE_OVERLAP", "300"))       # 밴드 간 겹침(행 잘림 방지)
+
 # 텍스트만 추출하는 게시판 (RPA 단계에서 이미 Excel 저장 완료, OCR 불필요)
 TEXT_BOARDS = {"구매", "판매", "회원정보", "등업신청"}
 
@@ -253,11 +259,15 @@ def _build_prompt(board_type: str) -> tuple[str, str]:
 }
 
 추출 규칙:
-1. 축종·원산지·브랜드 등 병합 셀 값은 해당 그룹 모든 행에 반복 적용하세요.
-2. 품목명은 '품목'에, 브랜드명은 '브랜드'에 각각 분리하세요.
-3. 포장 방식(VP, IWP 등)은 '비고'에 넣으세요.
-4. 숫자 필드(재고, 판매가, 평중)는 단위 없이 숫자만 넣으세요.
-5. 값을 확인할 수 없으면 빈 문자열("")로 두세요.
+1. 축종·원산지·브랜드·창고 등 병합 셀 값은 해당 그룹의 모든 행에 반드시 반복 적용하세요.
+   특히 창고(보관위치)가 여러 행에 걸쳐 병합된 경우 빈칸으로 두지 말고 각 행에 같은 값을 채우세요.
+2. 표의 모든 행을 하나도 빠짐없이 추출하세요. 요약·생략·중복 제거를 하지 마세요.
+   먼저 표의 품목 행 수를 센 뒤, products 배열의 길이가 그 수와 일치하도록 하세요.
+3. 셀에 보이는 값을 그대로(verbatim) 추출하세요. 품목명은 '품목'에, 브랜드명은 '브랜드'에 분리하세요.
+4. 창고 컬럼과 등급·EST(넘버) 컬럼을 혼동하지 마세요. 숫자/영문코드(예: 86M, 208A)는 창고가 아니라 EST입니다.
+5. 포장 방식(VP, IWP 등)은 '비고'에 넣으세요.
+6. 숫자 필드(재고, 판매가, 평중)는 단위 없이 숫자만 넣으세요.
+7. 값을 확인할 수 없으면 빈 문자열("")로 두세요. (단, 병합된 창고·원산지·브랜드는 규칙1에 따라 채웁니다.)
 """
         return prompt, "products"
 
@@ -674,29 +684,22 @@ class DataReviewGUI:
 # ─────────────────────────────────────────────
 # Core extractor
 # ─────────────────────────────────────────────
-def extract_data_from_image(image_path: str, board_type: str = "구매") -> dict | list:
-    """이미지에서 board_type에 맞는 구조화된 데이터 추출"""
-    log(f"AI 분석 중 [{board_type}]: {os.path.basename(image_path)}...")
-    base64_image = encode_image(image_path)
-    mime = get_mime_by_ext(image_path)
-
+def _ocr_from_b64(base64_image: str, mime: str, board_type: str):
+    """base64 이미지 1장을 board_type 스키마로 구조화 추출."""
     prompt, response_key = _build_prompt(board_type)
-
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64_image}"}},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64_image}", "detail": "high"}},
             ],
         }
     ]
-
     try:
         response = call_gpt_with_retry(messages, max_retry=3)
         if not response:
             return {}
-
         content = response.choices[0].message.content
         data = json.loads(content)
         return data.get(response_key, {})
@@ -706,6 +709,87 @@ def extract_data_from_image(image_path: str, board_type: str = "구매") -> dict
     except Exception as e:
         log(f"AI analysis error: {e}")
         return {}
+
+
+def _row_key(r: dict) -> tuple:
+    """행 동일성 판단용 키 (타일 경계 중복 제거)."""
+    return tuple(str(r.get(k, "")).strip() for k in ("품목", "등급", "EST", "브랜드", "창고", "평중_kg"))
+
+
+def _merge_product_tiles(tile_lists: list) -> list:
+    """
+    타일별 추출 결과를 순서대로 병합하되, 겹침(overlap) 구간에서 생긴
+    경계 중복만 제거한다. (표 내부의 정상적인 반복 행은 보존)
+    """
+    merged = []
+    for rows in tile_lists:
+        if not isinstance(rows, list) or not rows:
+            continue
+        if not merged:
+            merged.extend(rows)
+            continue
+        tail_keys = [_row_key(r) for r in merged[-12:]]
+        skip = 0
+        for r in rows:
+            if _row_key(r) in tail_keys:
+                skip += 1
+            else:
+                break
+        merged.extend(rows[skip:])
+    return merged
+
+
+def _extract_products_tiled(image_path: str) -> list:
+    """
+    세로로 긴 품목표 이미지를 겹침 밴드로 분할해 각각 OCR 후 병합.
+    (한 장 통째 OCR 시 API가 이미지를 축소해 발생하는 환각·행 누락 방지)
+    """
+    try:
+        im = Image.open(image_path)
+    except Exception:
+        return _ocr_from_b64(encode_image(image_path), get_mime_by_ext(image_path), "품목표")
+
+    w, h = im.size
+    band, ov = OCR_TILE_HEIGHT, OCR_TILE_OVERLAP
+    bounds = []
+    y = 0
+    while y < h:
+        y2 = min(h, y + band)
+        bounds.append((y, y2))
+        if y2 >= h:
+            break
+        y += max(1, band - ov)
+
+    log(f"AI 분석(타일 {len(bounds)}개) [품목표]: {os.path.basename(image_path)} (높이 {h}px)...")
+    tile_results = []
+    for (y1, y2) in bounds:
+        crop = im.crop((0, y1, w, y2))
+        buf = BytesIO()
+        crop.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        rows = _ocr_from_b64(b64, "image/png", "품목표")
+        tile_results.append(rows if isinstance(rows, list) else [])
+
+    return _merge_product_tiles(tile_results)
+
+
+def extract_data_from_image(image_path: str, board_type: str = "구매") -> dict | list:
+    """
+    이미지에서 board_type에 맞는 구조화 데이터 추출.
+    품목표(행 리스트)이고 이미지가 길면 자동으로 타일 분할 OCR을 수행한다.
+    """
+    log(f"AI 분석 중 [{board_type}]: {os.path.basename(image_path)}...")
+
+    if board_type == "품목표" and PIL_AVAILABLE:
+        try:
+            with Image.open(image_path) as _im:
+                _tall = _im.height > OCR_TILE_THRESHOLD
+        except Exception:
+            _tall = False
+        if _tall:
+            return _extract_products_tiled(image_path)
+
+    return _ocr_from_b64(encode_image(image_path), get_mime_by_ext(image_path), board_type)
 
 
 def _build_text_prompt(board_type: str) -> tuple[str, str]:
