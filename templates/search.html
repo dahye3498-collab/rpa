@@ -73,7 +73,7 @@
   <div class="tablewrap">
     <table id="tbl">
       <thead><tr>
-        <th>품목</th><th>창고</th><th>원산지</th><th>브랜드</th><th>등급</th><th>EST</th><th>판매가</th><th>업체</th><th>연락처</th><th>수집일</th><th>원본</th>
+        <th>품목</th><th>창고</th><th>원산지</th><th>브랜드</th><th>등급</th><th>EST</th><th>업체</th><th>연락처</th><th>수집일</th><th>원본</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -129,7 +129,6 @@ async function doSearch(){
       <td>${esc(it.브랜드)}</td>
       <td>${esc(it.등급)}</td>
       <td>${esc(it.EST)}</td>
-      <td>${esc(it.판매가_원)}</td>
       <td>${esc(it.업체)}</td>
       <td class="contact">${esc(it.연락처||'')}</td>
       <td>${esc(it.수집일)}</td>
