@@ -21,6 +21,8 @@ LOGIN_PWD = os.getenv("LOGIN_PWD")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL_PATH = os.path.join(BASE_DIR, "ref", "국제식품_상품목록.xlsx")
 DB_DIR = os.path.join(BASE_DIR, "visionmeat", "database")
+# 로그인 세션 저장(persistent). 회원 크롤러(rpa_members)와 공유 → 반복 로그인 방지
+SESSION_DIR = os.path.join(BASE_DIR, "browser_session")
 # Dynamic filename: YYMMDD_미트피플_데이터.xlsx
 OUTPUT_FILENAME = f"{datetime.now().strftime('%y%m%d')}_미트피플_데이터.xlsx"
 OUTPUT_PATH = os.path.join(DB_DIR, OUTPUT_FILENAME)
@@ -457,6 +459,45 @@ def _goto_next_page(page, board_frame, page_num) -> bool:
     return False
 
 
+def _wait_content_ready(page, timeout_sec=15):
+    """
+    #user_contents 스크린샷 전, 잘림 방지를 위해:
+      - 내부 이미지가 모두 로드 완료(complete && naturalHeight>0)
+      - 요소 높이(scrollHeight)가 연속 2회 동일(렌더 안정화)
+    될 때까지 대기. 실패해도 최소한의 대기 후 진행.
+    """
+    rf = page.frame(name="down")
+    if not rf:
+        page.wait_for_timeout(1800)
+        return
+    deadline = time.time() + timeout_sec
+    last_h, stable = -1, 0
+    while time.time() < deadline:
+        try:
+            info = rf.evaluate("""
+                () => {
+                    const uc = document.querySelector('#user_contents');
+                    if (!uc) return {h: 0, imgs: 0, loaded: 0};
+                    const imgs = Array.from(uc.querySelectorAll('img'));
+                    const loaded = imgs.filter(i => i.complete && i.naturalHeight > 0).length;
+                    return {h: uc.scrollHeight, imgs: imgs.length, loaded: loaded};
+                }
+            """)
+        except Exception:
+            break
+        h = info.get("h", 0)
+        imgs_ok = (info.get("imgs", 0) == 0) or (info.get("loaded", 0) >= info.get("imgs", 0))
+        if h > 0 and imgs_ok and h == last_h:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+        last_h = h
+        page.wait_for_timeout(400)
+    page.wait_for_timeout(300)
+
+
 def capture_recent_posts(page, board_name, vision_meat_root, start_date,
                          max_posts=None, hooks=None, max_pages=80):
     """
@@ -571,12 +612,12 @@ def capture_recent_posts(page, board_name, vision_meat_root, start_date,
                 continue
             # iframe 내부에서 본문 페이지로 이동 (조회수는 증가하지만 스크린샷 필요)
             rf.evaluate("(u) => { window.location.href = u; }", full_url)
-            page.wait_for_timeout(2500)
+            page.wait_for_timeout(2000)
 
             content_area = board_frame.locator("#user_contents")
             content_area.first.wait_for(timeout=12000)
-            # 이미지 로딩 여유
-            page.wait_for_timeout(1800)
+            # 잘림 방지: 이미지 로드 완료 + 높이 안정화까지 대기
+            _wait_content_ready(page, timeout_sec=15)
 
             timestamp = int(time.time())
             file_name = f"{safe_title}_{timestamp}.png"
@@ -642,12 +683,17 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
     log(f"대상 게시판: {[b['name'] for b in boards]}")
 
     with sync_playwright() as p:
-        # 1. 브라우저 초기화 (한 번만 열고 날짜별로 반복)
-        is_server = os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
-        browser = p.chromium.launch(headless=bool(is_server))
+        # 1. 브라우저 초기화 — persistent context로 로그인 세션 재사용(반복 로그인 방지)
         # device_scale_factor=2: 캡처 해상도 2배 → 표 글자 선명 (OCR 정확도 향상)
-        context = browser.new_context(viewport={'width': 1280, 'height': 1024}, device_scale_factor=2)
-        page = context.new_page()
+        is_server = os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        context = p.chromium.launch_persistent_context(
+            SESSION_DIR,
+            headless=bool(is_server),
+            viewport={'width': 1280, 'height': 1024},
+            device_scale_factor=2,
+        )
+        page = context.pages[0] if context.pages else context.new_page()
 
         log("다음 카페 접속 중...")
         try:
@@ -886,7 +932,7 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
 
             log(f"[{date_str}] 텍스트 수집 완료. 누적: {len(all_captured)}개")
 
-        browser.close()
+        context.close()
 
     if not all_captured:
         log("새롭게 수집된 데이터가 없습니다.")
