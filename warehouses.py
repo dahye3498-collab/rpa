@@ -23,25 +23,43 @@ KNOWN_FIX = {
 }
 
 
-def load_warehouses() -> list:
-    out = []
-    if os.path.exists(MD_PATH):
-        for ln in open(MD_PATH, encoding="utf-8"):
-            s = ln.strip()
-            if not s or s.startswith("#") or s.startswith(">"):
-                continue
-            s = re.sub(r"^[-*]\s+", "", s)  # 혹시 모를 불릿 제거
-            out.append(s)
+def _parse_md():
+    """MD 파싱 → (표준명 리스트, {정규화 동의어: 표준명})."""
+    canon, syn = [], {}
+    if not os.path.exists(MD_PATH):
+        return canon, syn
+    for ln in open(MD_PATH, encoding="utf-8"):
+        s = ln.strip()
+        # 주석/헤더/빈줄/노트 스킵
+        if not s or s[0] in "#>[<-":
+            continue
+        s = re.sub(r"^[*]\s+", "", s)
+        # '표준명 | 동의어1, 동의어2'
+        if "|" in s:
+            left, right = s.split("|", 1)
+            name = left.strip()
+            syns = [x.strip() for x in re.split(r"[,/]", right) if x.strip()]
+        else:
+            name, syns = s, []
+        if not name:
+            continue
+        canon.append(name)
+        for v in syns:
+            syn[re.sub(r"\s+", "", v).lower()] = name
     # 중복 제거(순서 유지)
     seen, res = set(), []
-    for w in out:
+    for w in canon:
         if w not in seen:
             seen.add(w)
             res.append(w)
-    return res
+    return res, syn
 
 
-WAREHOUSES = load_warehouses()
+def load_warehouses() -> list:
+    return _parse_md()[0]
+
+
+WAREHOUSES, _SYN_MAP = _parse_md()
 
 
 def _norm(s) -> str:
@@ -60,6 +78,8 @@ def _canon_one(token: str) -> str:
         return KNOWN_FIX[n]
     if n in _NORM_MAP:             # 표준 목록과 정확 일치(띄어쓰기/대소문자만 보정)
         return _NORM_MAP[n]
+    if n in _SYN_MAP:              # MD에 등록된 동의어/오독 → 표준명
+        return _SYN_MAP[n]
     return t                       # 불확실하면 원문 유지(오매핑 방지)
 
 
