@@ -35,6 +35,8 @@ SYNONYM_GROUPS = [
     ["삼겹양지", "삼겹", "양지"],
     ["차돌박이", "차돌"],
     ["척아이롤", "척아이"],
+    # 브랜드 한글↔영문 별칭 (소스에 없는 것 보완)
+    ["TRUE WEST", "트루웨스트", "TRUEWEST", "트루웨스트"],
 ]
 
 # ── 창고 OCR 오독 보정 ──
@@ -146,7 +148,7 @@ def recent_dates(n: int) -> list:
 
 
 def search(q: str = "", warehouse: str = "", origin: str = "",
-           brand: str = "", field: str = "품목", limit: int = 1000,
+           brand: str = "", field: str = "전체", limit: int = 1000,
            recent: int = 3) -> dict:
     """
     품목 검색. recent=최근 수집일 N개만 조회(기본 3, 0이면 전체).

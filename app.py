@@ -45,7 +45,7 @@ def api_search():
     warehouse = request.args.get("warehouse", "").strip()
     origin = request.args.get("origin", "").strip()
     brand = request.args.get("brand", "").strip()
-    field = request.args.get("field", "품목").strip() or "품목"
+    field = request.args.get("field", "전체").strip() or "전체"
     try:
         recent = int(request.args.get("recent", "3"))
     except ValueError:

@@ -48,9 +48,9 @@
   <div class="searchbar">
     <input type="text" id="q" placeholder="품목 검색 (예: 끝갈비, 립앤드, 살치살)" autofocus>
     <select id="field" title="검색 대상 필드">
+      <option value="전체" selected>전체</option>
       <option value="품목">품목</option>
       <option value="브랜드">브랜드</option>
-      <option value="전체">전체</option>
     </select>
     <select id="recent" title="조회 기간">
       <option value="3" selected>최근 3일</option>
@@ -146,7 +146,7 @@ async function doSearch(){
 }
 
 $('#go').onclick = doSearch;
-$('#clear').onclick = ()=>{ ['#q','#warehouse','#origin','#brand'].forEach(s=>$(s).value=''); $('#field').value='품목'; $('#recent').value='3'; doSearch(); };
+$('#clear').onclick = ()=>{ ['#q','#warehouse','#origin','#brand'].forEach(s=>$(s).value=''); $('#field').value='전체'; $('#recent').value='3'; doSearch(); };
 $('#recent').addEventListener('change', doSearch);
 $('#q').addEventListener('keydown', e=>{ if(e.key==='Enter') doSearch(); });
 ['#warehouse','#origin','#brand'].forEach(s=>$(s).addEventListener('keydown',e=>{ if(e.key==='Enter') doSearch(); }));
