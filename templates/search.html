@@ -52,6 +52,11 @@
       <option value="브랜드">브랜드</option>
       <option value="전체">전체</option>
     </select>
+    <select id="recent" title="조회 기간">
+      <option value="3" selected>최근 3일</option>
+      <option value="7">최근 7일</option>
+      <option value="0">전체</option>
+    </select>
     <input type="text" id="warehouse" placeholder="창고 필터 (예: 강동1)">
     <input type="text" id="origin" placeholder="원산지 (예: 미국)">
     <input type="text" id="brand" placeholder="브랜드 (예: EXCEL)">
@@ -106,6 +111,7 @@ async function doSearch(){
   const q = $('#q').value.trim();
   const params = new URLSearchParams({
     q, field:$('#field').value,
+    recent:$('#recent').value,
     warehouse:$('#warehouse').value.trim(),
     origin:$('#origin').value.trim(),
     brand:$('#brand').value.trim(),
@@ -117,7 +123,8 @@ async function doSearch(){
   const tb = $('#rows'); tb.innerHTML='';
   if(!d.results.length){ $('#empty').style.display='block'; $('#tbl').style.display='none'; $('#meta').textContent = `0건`; return; }
   $('#empty').style.display='none'; $('#tbl').style.display='';
-  $('#meta').textContent = `${d.count.toLocaleString()}건 매칭` + (d.count>d.shown?` (상위 ${d.shown}건 표시)`:'');
+  const per = Array.isArray(d.dates) ? ` · 기간 ${d.dates.join(', ')}` : ' · 전체 기간';
+  $('#meta').textContent = `${d.count.toLocaleString()}건 매칭` + (d.count>d.shown?` (상위 ${d.shown}건 표시)`:'') + per;
   const frag = document.createDocumentFragment();
   for(const it of d.results){
     const tr = document.createElement('tr');
@@ -139,7 +146,8 @@ async function doSearch(){
 }
 
 $('#go').onclick = doSearch;
-$('#clear').onclick = ()=>{ ['#q','#warehouse','#origin','#brand'].forEach(s=>$(s).value=''); $('#field').value='품목'; doSearch(); };
+$('#clear').onclick = ()=>{ ['#q','#warehouse','#origin','#brand'].forEach(s=>$(s).value=''); $('#field').value='품목'; $('#recent').value='3'; doSearch(); };
+$('#recent').addEventListener('change', doSearch);
 $('#q').addEventListener('keydown', e=>{ if(e.key==='Enter') doSearch(); });
 ['#warehouse','#origin','#brand'].forEach(s=>$(s).addEventListener('keydown',e=>{ if(e.key==='Enter') doSearch(); }));
 document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{ $('#q').value=c.dataset.q; doSearch(); });

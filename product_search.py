@@ -138,18 +138,31 @@ def load_rows(force: bool = False) -> list:
     return rows
 
 
+def recent_dates(n: int) -> list:
+    """가장 최근 수집일 n개(내림차순). n<=0이면 전체."""
+    rows = load_rows()
+    ds = sorted({str(r.get("수집일", "")) for r in rows if str(r.get("수집일", "")).strip()}, reverse=True)
+    return ds[:n] if n and n > 0 else ds
+
+
 def search(q: str = "", warehouse: str = "", origin: str = "",
-           brand: str = "", field: str = "품목", limit: int = 1000) -> dict:
+           brand: str = "", field: str = "품목", limit: int = 1000,
+           recent: int = 3) -> dict:
     """
-    품목 검색. 반환: {"count": 전체매칭수, "results": [행,...] (limit까지)}
+    품목 검색. recent=최근 수집일 N개만 조회(기본 3, 0이면 전체).
+    반환: {"count": 전체매칭수, "results": [행,...] (limit까지), "dates": 조회된 날짜}
     """
     rows = load_rows()
     terms = expand_query(q) if q else None
     wq, oq, bq = _norm(warehouse), _norm(origin), _norm(brand)
     field = field if field in SEARCH_FIELDS else "품목"
 
+    allowed = set(recent_dates(recent)) if (recent and recent > 0) else None
+
     out = []
     for r in rows:
+        if allowed is not None and str(r.get("수집일", "")) not in allowed:
+            continue
         if terms:
             if field == "전체":
                 hay = _norm(" ".join(str(v) for k, v in r.items() if k not in ("파일명",)))
@@ -165,7 +178,11 @@ def search(q: str = "", warehouse: str = "", origin: str = "",
             continue
         out.append(r)
 
-    return {"count": len(out), "results": out[:limit]}
+    return {
+        "count": len(out),
+        "results": out[:limit],
+        "dates": sorted(allowed, reverse=True) if allowed is not None else "전체",
+    }
 
 
 def stats() -> dict:
