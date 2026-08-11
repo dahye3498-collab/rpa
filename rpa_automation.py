@@ -8,6 +8,13 @@ from playwright.sync_api import sync_playwright
 from openai import OpenAI
 import pandas as pd
 
+try:
+    from PIL import Image
+    from io import BytesIO
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
+
 load_dotenv()
 
 # Configuration
@@ -498,6 +505,119 @@ def _wait_content_ready(page, timeout_sec=15):
     page.wait_for_timeout(300)
 
 
+def _download_content_images(page, out_path):
+    """
+    이미지형 품목표: #user_contents의 원본 이미지를 직접 다운로드해 저장.
+    (렌더 스크린샷 대신 원본 파일 → 잘림 없음, 화질 최상)
+    - 이미지 여러 개면 세로로 이어붙여 한 파일로 저장.
+    - 이미지가 없으면 False 반환(→ 호출부에서 스크린샷 폴백).
+    """
+    if not PIL_AVAILABLE:
+        return False
+    rf = page.frame(name="down")
+    if not rf:
+        return False
+    try:
+        srcs = rf.evaluate("""
+            () => Array.from(document.querySelectorAll('#user_contents img'))
+                    .map(i => i.getAttribute('data-img-src') || i.src || '')
+                    .filter(s => s && s.indexOf('data:') !== 0)
+        """)
+    except Exception:
+        return False
+    srcs = [s for s in (srcs or []) if s]
+    if not srcs:
+        return False
+
+    imgs = []
+    for s in srcs:
+        try:
+            r = page.request.get(s, timeout=30000)
+            if not r.ok:
+                continue
+            imgs.append(Image.open(BytesIO(r.body())).convert("RGB"))
+        except Exception:
+            continue
+    if not imgs:
+        return False
+
+    try:
+        if len(imgs) == 1:
+            imgs[0].save(out_path)
+        else:
+            W = max(i.width for i in imgs)
+            H = sum(i.height for i in imgs)
+            canvas = Image.new("RGB", (W, H), "white")
+            y = 0
+            for i in imgs:
+                canvas.paste(i, (0, y))
+                y += i.height
+            canvas.save(out_path)
+        return True
+    except Exception:
+        return False
+
+
+def _force_full_render(page):
+    """
+    세로로 긴 이미지/표에서 화면 밖 영역이 페인트되지 않아 아래가 백지로 잘리는 것 방지.
+    iframe 내용을 위→아래로 스크롤해 전체를 강제 렌더한 뒤 맨 위로 복귀.
+    """
+    rf = page.frame(name="down")
+    if not rf:
+        return
+    try:
+        rf.evaluate("""
+            async () => {
+                const total = document.body.scrollHeight;
+                const step = Math.max(400, window.innerHeight || 800);
+                for (let y = 0; y <= total; y += step) {
+                    window.scrollTo(0, y);
+                    await new Promise(r => setTimeout(r, 120));
+                }
+                window.scrollTo(0, 0);
+                await new Promise(r => setTimeout(r, 200));
+            }
+        """)
+    except Exception:
+        pass
+
+
+def _expand_content_width(page):
+    """
+    2단 레이아웃 등 본문이 컨테이너보다 넓을 때 오른쪽이 잘리는 것을 방지.
+    #user_contents 및 조상/내부 표·이미지의 폭 제약을 풀어 전체 폭이 렌더되게 함.
+    """
+    rf = page.frame(name="down")
+    if not rf:
+        return
+    try:
+        rf.evaluate("""
+            () => {
+                const uc = document.querySelector('#user_contents');
+                if (!uc) return;
+                // 조상들의 클리핑/폭 제약만 해제 (max-content 강제 X → 폭 폭발 방지)
+                let el = uc;
+                while (el && el !== document.body) {
+                    el.style.setProperty('overflow', 'visible', 'important');
+                    el.style.setProperty('max-width', 'none', 'important');
+                    el = el.parentElement;
+                }
+                document.documentElement.style.setProperty('overflow', 'visible', 'important');
+                document.body.style.setProperty('overflow', 'visible', 'important');
+                // #user_contents 박스를 '내용 전체 폭(scrollWidth)'만큼만 확장
+                const tbls = Array.from(uc.querySelectorAll('table')).map(t => t.scrollWidth || 0);
+                let need = Math.max(uc.scrollWidth || 0, ...tbls, 0);
+                if (need > 0) {
+                    need = Math.min(need + 4, 6000);  // 폭주 방지 상한
+                    uc.style.setProperty('width', need + 'px', 'important');
+                }
+            }
+        """)
+    except Exception:
+        pass
+
+
 def capture_recent_posts(page, board_name, vision_meat_root, start_date,
                          max_posts=None, hooks=None, max_pages=80):
     """
@@ -622,14 +742,23 @@ def capture_recent_posts(page, board_name, vision_meat_root, start_date,
             timestamp = int(time.time())
             file_name = f"{safe_title}_{timestamp}.png"
             file_path = os.path.join(capture_dir, file_name)
-            content_area.first.screenshot(path=file_path)
+
+            # 이미지형 품목표 → 원본 이미지 직접 다운로드(잘림 없음), 아니면 스크린샷 폴백
+            if _download_content_images(page, file_path):
+                log(f"[{board_name}] 원본 이미지 저장: {file_name}")
+            else:
+                _expand_content_width(page)   # 가로 잘림 방지(2단 표)
+                _force_full_render(page)      # 세로 미페인트 방지
+                page.wait_for_timeout(500)
+                content_area.first.screenshot(path=file_path)
+                log(f"[{board_name}] 스크린샷 저장: {file_name}")
+
             captured_data.append({
                 "board": board_name,
                 "local_path": file_path,
                 "title": post["title"],
                 "date": post["date"],
             })
-            log(f"[{board_name}] 저장 성공: {file_name}")
         except Exception as e:
             log(f"[{board_name}] 게시글 '{post['title']}' 캡처 오류: {e}")
 
@@ -690,7 +819,7 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
         context = p.chromium.launch_persistent_context(
             SESSION_DIR,
             headless=bool(is_server),
-            viewport={'width': 1280, 'height': 1024},
+            viewport={'width': 1920, 'height': 1024},
             device_scale_factor=2,
         )
         page = context.pages[0] if context.pages else context.new_page()
