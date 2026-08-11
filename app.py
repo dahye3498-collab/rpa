@@ -59,6 +59,18 @@ def api_search_stats():
     return jsonify(product_search.stats())
 
 
+@app.route("/api/build_contacts", methods=["POST", "GET"])
+def api_build_contacts():
+    """업체 연락처 인덱스 재빌드 (신규 업체만 상단 OCR)."""
+    try:
+        import contacts
+        force = request.args.get("force", "").strip() in ("1", "true", "yes")
+        idx = contacts.build_contacts(force=force)
+        return jsonify({"ok": True, "vendors": len(idx)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/screenshot/<date>/<path:filename>")
 def screenshot(date, filename):
     """원본 품목표 스크린샷 서빙 (검색 결과 → 원본 대조용)."""

@@ -12,6 +12,11 @@ import re
 import glob
 import pandas as pd
 
+try:
+    import contacts as _contacts
+except Exception:
+    _contacts = None
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(BASE_DIR, "visionmeat", "database")
 
@@ -73,7 +78,12 @@ _cache = {"sig": None, "rows": []}
 
 def _db_signature():
     files = sorted(glob.glob(os.path.join(DB_DIR, "*_품목표_데이터.xlsx")))
-    return tuple((f, os.path.getmtime(f)) for f in files)
+    sig = [(f, os.path.getmtime(f)) for f in files]
+    # 연락처 인덱스 변경도 감지 (재빌드 시 검색 결과 갱신)
+    cpath = os.path.join(DB_DIR, "vendor_contacts.json")
+    if os.path.exists(cpath):
+        sig.append((cpath, os.path.getmtime(cpath)))
+    return tuple(sig)
 
 
 def load_rows(force: bool = False) -> list:
@@ -81,6 +91,8 @@ def load_rows(force: bool = False) -> list:
     sig = _db_signature()
     if not force and _cache["sig"] == sig:
         return _cache["rows"]
+
+    contact_idx = _contacts.load_contacts() if _contacts else {}
 
     rows = []
     for f, _ in sig:
@@ -94,7 +106,14 @@ def load_rows(force: bool = False) -> list:
             r["창고"] = WAREHOUSE_FIX.get(wh, wh)
             # 업체명(파일명에서 _타임스탬프.png 제거)
             fn = str(r.get("파일명", ""))
-            r["업체"] = re.sub(r"_\d+\.(png|jpg|jpeg)$", "", fn, flags=re.I)
+            vendor = re.sub(r"_\d+\.(png|jpg|jpeg)$", "", fn, flags=re.I)
+            r["업체"] = vendor
+            # 연락처 첨부
+            c = contact_idx.get(vendor) or {}
+            r["담당자"] = c.get("담당자", "")
+            r["전화"] = " / ".join(c.get("전화", []) or [])
+            r["팩스"] = " / ".join(c.get("팩스", []) or [])
+            r["연락처"] = _contacts.contact_str(vendor, contact_idx) if _contacts else ""
             rows.append(r)
 
     _cache["sig"] = sig

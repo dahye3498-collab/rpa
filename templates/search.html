@@ -31,6 +31,7 @@
   td.item { font-weight:600; }
   mark { background:transparent; color:var(--hit); font-weight:700; }
   .wh { color:#7ee0a1; }
+  td.contact { color:#ffd98a; font-variant-numeric:tabular-nums; }
   a.shot { color:var(--accent); text-decoration:none; }
   .empty { color:var(--sub); padding:30px; text-align:center; }
   .hint { color:var(--sub); font-size:12px; margin-top:6px; }
@@ -72,7 +73,7 @@
   <div class="tablewrap">
     <table id="tbl">
       <thead><tr>
-        <th>품목</th><th>창고</th><th>원산지</th><th>브랜드</th><th>등급</th><th>EST</th><th>판매가</th><th>업체</th><th>수집일</th><th>원본</th>
+        <th>품목</th><th>창고</th><th>원산지</th><th>브랜드</th><th>등급</th><th>EST</th><th>판매가</th><th>업체</th><th>연락처</th><th>수집일</th><th>원본</th>
       </tr></thead>
       <tbody id="rows"></tbody>
     </table>
@@ -130,6 +131,7 @@ async function doSearch(){
       <td>${esc(it.EST)}</td>
       <td>${esc(it.판매가_원)}</td>
       <td>${esc(it.업체)}</td>
+      <td class="contact">${esc(it.연락처||'')}</td>
       <td>${esc(it.수집일)}</td>
       <td>${shot?`<a class="shot" href="${shot}" target="_blank">🔍원본</a>`:''}</td>`;
     frag.appendChild(tr);
