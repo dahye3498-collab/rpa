@@ -269,6 +269,11 @@ def _build_prompt(board_type: str) -> tuple[str, str]:
 6. 숫자 필드(재고, 판매가, 평중)는 단위 없이 숫자만 넣으세요.
 7. 값을 확인할 수 없으면 빈 문자열("")로 두세요. (단, 병합된 창고·원산지·브랜드는 규칙1에 따라 채웁니다.)
 """
+        try:
+            import warehouses
+            prompt += "\n\n" + warehouses.prompt_block()
+        except Exception:
+            pass
         return prompt, "products"
 
     # ── 2. 등업신청 ──────────────────────────────────────────────────────────

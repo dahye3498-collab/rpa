@@ -17,6 +17,11 @@ try:
 except Exception:
     _contacts = None
 
+try:
+    import warehouses as _wh
+except Exception:
+    _wh = None
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_DIR = os.path.join(BASE_DIR, "visionmeat", "database")
 
@@ -103,7 +108,7 @@ def load_rows(force: bool = False) -> list:
         for rec in df.to_dict("records"):
             r = {k: ("" if (v is None or (isinstance(v, float) and pd.isna(v))) else v) for k, v in rec.items()}
             wh = str(r.get("창고", "")).strip()
-            r["창고"] = WAREHOUSE_FIX.get(wh, wh)
+            r["창고"] = _wh.canonicalize(wh) if _wh else WAREHOUSE_FIX.get(wh, wh)
             # 업체명(파일명에서 _타임스탬프.png 제거)
             fn = str(r.get("파일명", ""))
             vendor = re.sub(r"_\d+\.(png|jpg|jpeg)$", "", fn, flags=re.I)
