@@ -51,30 +51,42 @@ def _norm(s) -> str:
     return re.sub(r"\s+", "", str(s if s is not None else "")).lower()
 
 
-# variant(정규화) -> 대표명
-_VAR2CANON = {}
-for _g in SYNONYM_GROUPS:
-    for _v in _g:
-        _VAR2CANON[_norm(_v)] = _g[0]
+# ── 소스데이터 동의어 그룹 로드 (품목/브랜드/축종) ──
+SOURCE_XLSX = os.path.join(BASE_DIR, "[운영] 자동변환_소스데이터.xlsx")
+
+
+def _load_source_groups(sheets) -> list:
+    """각 행 = [표준명, 동의어1, 동의어2, ...] 형태 시트를 그룹 리스트로 로드."""
+    groups = []
+    for sh in sheets:
+        try:
+            df = pd.read_excel(SOURCE_XLSX, sheet_name=sh, header=None)
+        except Exception:
+            continue
+        for _, r in df.iterrows():
+            vals = [str(x).strip() for x in r.tolist()
+                    if str(x).strip() and str(x).strip().lower() != "nan"]
+            if len(vals) >= 2:  # 표준 + 동의어 최소 1개
+                groups.append(vals)
+    return groups
+
+
+# 하드코딩 그룹(OCR 오독 포함) + 소스데이터 그룹(품목·브랜드·축종)
+ALL_GROUPS = SYNONYM_GROUPS + _load_source_groups(
+    ["품목명_한글사용", "브랜드명_한글사용", "축종_한글사용"]
+)
+_GROUPS_NORM = [[_norm(v) for v in g] for g in ALL_GROUPS]
 
 
 def expand_query(q: str) -> set:
-    """검색어를 동의어 그룹으로 확장한 정규화 term 집합 반환."""
+    """검색어가 어떤 동의어 그룹의 정확한 변형이면 그 그룹 전체(정규화)로 확장."""
     nq = _norm(q)
     if not nq:
         return set()
     terms = {nq}
-    canon = _VAR2CANON.get(nq)
-    if not canon:
-        for v, c in _VAR2CANON.items():
-            if nq in v or v in nq:
-                canon = c
-                break
-    if canon:
-        for g in SYNONYM_GROUPS:
-            if g[0] == canon:
-                terms |= {_norm(v) for v in g}
-                break
+    for gn in _GROUPS_NORM:
+        if nq in gn:
+            terms |= set(gn)
     return terms
 
 
