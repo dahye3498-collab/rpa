@@ -518,16 +518,28 @@ def _download_content_images(page, out_path):
     if not rf:
         return False
     try:
-        srcs = rf.evaluate("""
-            () => Array.from(document.querySelectorAll('#user_contents img'))
-                    .map(i => i.getAttribute('data-img-src') || i.src || '')
-                    .filter(s => s && s.indexOf('data:') !== 0)
+        info = rf.evaluate("""
+            () => {
+                const uc = document.querySelector('#user_contents');
+                if (!uc) return {trs: 0, imgs: []};
+                const imgs = Array.from(uc.querySelectorAll('img')).map(i => ({
+                    src: i.getAttribute('data-img-src') || i.src || '',
+                    nw: i.naturalWidth || 0, nh: i.naturalHeight || 0
+                })).filter(o => o.src && o.src.indexOf('data:') !== 0);
+                return {trs: uc.querySelectorAll('tr').length, imgs};
+            }
         """)
     except Exception:
         return False
-    srcs = [s for s in (srcs or []) if s]
-    if not srcs:
+
+    trs = (info or {}).get("trs", 0)
+    all_imgs = (info or {}).get("imgs", []) or []
+    # 로고/아이콘 제외: 충분히 큰 이미지만 '품목표 이미지'로 간주
+    big = [o for o in all_imgs if o.get("nh", 0) >= 400 and o.get("nw", 0) >= 300]
+    # 실질적인 표가 있으면(=텍스트 품목표) 스크린샷이 맞음, 큰 이미지 없어도 스크린샷
+    if trs >= 5 or not big:
         return False
+    srcs = [o["src"] for o in big]
 
     imgs = []
     for s in srcs:
@@ -743,13 +755,12 @@ def capture_recent_posts(page, board_name, vision_meat_root, start_date,
             file_name = f"{safe_title}_{timestamp}.png"
             file_path = os.path.join(capture_dir, file_name)
 
-            # 이미지형 품목표 → 원본 이미지 직접 다운로드(잘림 없음), 아니면 스크린샷 폴백
+            # 이미지형 품목표 → 원본 이미지 직접 다운로드(잘림 없음)
+            # HTML표형 → 순수 스크린샷 (표는 완전 렌더되므로 잘림 없음; 스타일 조작은
+            #            초대형 표 캡처를 깨뜨려 오히려 실패시키므로 하지 않음)
             if _download_content_images(page, file_path):
                 log(f"[{board_name}] 원본 이미지 저장: {file_name}")
             else:
-                _expand_content_width(page)   # 가로 잘림 방지(2단 표)
-                _force_full_render(page)      # 세로 미페인트 방지
-                page.wait_for_timeout(500)
                 content_area.first.screenshot(path=file_path)
                 log(f"[{board_name}] 스크린샷 저장: {file_name}")
 
@@ -819,7 +830,7 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
         context = p.chromium.launch_persistent_context(
             SESSION_DIR,
             headless=bool(is_server),
-            viewport={'width': 1920, 'height': 1024},
+            viewport={'width': 1280, 'height': 1024},
             device_scale_factor=2,
         )
         page = context.pages[0] if context.pages else context.new_page()
