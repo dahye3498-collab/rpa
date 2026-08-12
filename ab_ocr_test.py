@@ -102,6 +102,69 @@ def salvage_objects(text: str) -> list:
     return out
 
 
+# ── 압축 출력(TSV) 포맷 — 출력 토큰 대폭 절감 ────────────────
+# 매 행 한글 키 14개를 반복하는 대신 값만 탭 구분으로 출력 → 다시 매핑
+COMPACT_COLS = ["축종", "원산지", "보관", "품목", "브랜드", "등급", "EST",
+                "평중_kg", "스펙_설명", "재고_box", "창고", "소비기한",
+                "판매가_원", "수정일", "비고"]
+
+
+def build_compact_prompt() -> str:
+    cols = " | ".join(f"{i+1}.{c}" for i, c in enumerate(COMPACT_COLS))
+    prompt = f"""이 이미지는 축산물 품목표(재고/가격 리스트)입니다.
+표의 각 품목 행을 TSV(탭 구분) 한 줄로 출력하세요.
+헤더·설명·코드펜스·번호 없이 오직 데이터 행만 출력합니다.
+
+열 순서(정확히 15열, 탭 14개로 구분):
+{cols}
+
+규칙:
+1. 병합 셀(축종·원산지·브랜드·창고)은 해당 그룹의 모든 행에 반드시 반복해 채우세요.
+   특히 창고가 여러 행에 병합되면 빈칸으로 두지 말고 각 행에 같은 값을 채우세요.
+2. 표의 모든 행을 하나도 빠짐없이. 요약·생략·중복제거 금지.
+   2단(좌우 2열) 레이아웃이면 좌측 열 전체를 먼저, 그다음 우측 열 전체를 출력하세요.
+3. 값은 보이는 그대로(verbatim). 품목명은 4.품목, 브랜드명은 5.브랜드로 분리.
+4. 창고와 등급·EST 혼동 금지. 숫자/영문코드(예: 86M, 208A)는 창고가 아니라 EST.
+5. 포장방식(VP, IWP 등)은 15.비고.
+6. 숫자 필드(평중_kg, 재고_box, 판매가_원)는 단위 없이 숫자만.
+7. 값이 없으면 빈칸(탭 사이에 아무것도 쓰지 않음). 단 병합된 창고·원산지·브랜드는 규칙1대로 채움.
+8. 각 셀 안에 탭·줄바꿈을 넣지 마세요. 한 품목 = 정확히 한 줄 = 탭 14개.
+"""
+    try:
+        import warehouses
+        prompt += "\n" + warehouses.prompt_block()
+    except Exception:
+        pass
+    return prompt
+
+
+def parse_tsv_rows(text: str) -> list:
+    """TSV 텍스트를 행 dict 리스트로. 잘린 마지막 줄은 자연히 버려짐."""
+    rows = []
+    n = len(COMPACT_COLS)
+    for line in (text or "").splitlines():
+        s = line.strip()
+        if not s or s.startswith("```") or s.startswith("#"):
+            continue
+        cells = line.split("\t")
+        if len(cells) < 4:      # 품목(4번째)도 못 채운 잘린 줄 → 스킵
+            continue
+        cells = (cells + [""] * n)[:n]
+        r = {COMPACT_COLS[i]: cells[i].strip() for i in range(n)}
+        if r.get("품목"):
+            rows.append(r)
+    return rows
+
+
+# ── 가격표(100만 토큰당, 2026-08 도입가 반영) ────────────────
+PRICING = {
+    "claude-sonnet-5":  (2.0, 10.0),   # 도입가 (~2026-08-31), 이후 3/15
+    "claude-haiku-4-5": (1.0, 5.0),
+    "claude-opus-5":    (5.0, 25.0),
+}
+_USAGE = {"in": 0, "out": 0}
+
+
 # ── Claude OCR (batch_processor의 GPT 경로와 동일 조건) ───────
 import anthropic
 _aclient = None
@@ -120,8 +183,9 @@ _CLAUDE_SYS = (
 )
 
 
-def claude_ocr_from_b64(b64, media_type, prompt, response_key, model, think=False):
-    # max_tokens 16000: 밀집표(수십 행) JSON이 잘리지 않게 넉넉히.
+def claude_ocr_from_b64(b64, media_type, prompt, response_key, model,
+                        think=False, compact=False):
+    # max_tokens 16000: 밀집표(수십 행) 출력이 잘리지 않게 넉넉히.
     # 16k는 비스트리밍 HTTP 타임아웃 경계라 스트리밍으로 호출.
     kwargs = dict(
         model=model,
@@ -140,7 +204,14 @@ def claude_ocr_from_b64(b64, media_type, prompt, response_key, model, think=Fals
         try:
             with aclient().messages.stream(**kwargs) as st:
                 resp = st.get_final_message()
+            try:
+                _USAGE["in"] += resp.usage.input_tokens
+                _USAGE["out"] += resp.usage.output_tokens
+            except Exception:
+                pass
             text = "".join(b.text for b in resp.content if b.type == "text")
+            if compact:                       # TSV: 잘린 마지막 줄은 자연히 버려짐
+                return parse_tsv_rows(text)
             data = parse_json_loose(text)
             val = data.get(response_key) if isinstance(data, dict) else None
             if isinstance(val, list) and val:
@@ -170,9 +241,13 @@ def _tile_bounds(h):
     return bounds
 
 
-def claude_extract_products(path, model, think=False):
-    """batch_processor.extract_data_from_image 의 Claude 버전 (동일 타일링)."""
-    prompt, key = bp._build_prompt("품목표")
+def claude_extract_products(path, model, think=False, compact=False):
+    """batch_processor.extract_data_from_image 의 Claude 버전 (동일 타일링).
+    compact=True면 TSV 압축 출력 프롬프트 사용(출력 토큰 절감)."""
+    if compact:
+        prompt, key = build_compact_prompt(), None
+    else:
+        prompt, key = bp._build_prompt("품목표")
     tall = False
     if PIL_OK:
         try:
@@ -182,7 +257,7 @@ def claude_extract_products(path, model, think=False):
             tall = False
     if not tall:
         b64 = bp.encode_image(path)
-        return claude_ocr_from_b64(b64, bp.get_mime_by_ext(path), prompt, key, model, think)
+        return claude_ocr_from_b64(b64, bp.get_mime_by_ext(path), prompt, key, model, think, compact)
 
     with Image.open(path) as im:
         w, h = im.size
@@ -193,7 +268,7 @@ def claude_extract_products(path, model, think=False):
             buf = BytesIO()
             crop.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-            rows = claude_ocr_from_b64(b64, "image/png", prompt, key, model, think)
+            rows = claude_ocr_from_b64(b64, "image/png", prompt, key, model, think, compact)
             tiles.append(rows if isinstance(rows, list) else [])
     return bp._merge_product_tiles(tiles)
 
@@ -229,6 +304,8 @@ def main():
     ap.add_argument("--think", action="store_true")
     ap.add_argument("--engine", choices=["both", "claude", "gpt"], default="both",
                     help="both=둘 다 실행 / claude=Claude만(이전 GPT결과 재사용) / gpt=GPT만")
+    ap.add_argument("--compact", action="store_true",
+                    help="Claude 출력을 TSV 압축포맷으로(출력 토큰·비용 절감)")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -264,7 +341,8 @@ def main():
                 prior = {}
 
     print("=" * 72)
-    print(f"  품목표 OCR A/B  |  gpt-4.1  vs  {args.model}  (think={args.think}, engine={args.engine})")
+    print(f"  품목표 OCR A/B  |  gpt-4.1  vs  {args.model}  "
+          f"(think={args.think}, engine={args.engine}, compact={args.compact})")
     print(f"  날짜 {date}  ·  이미지 {len(images)}장")
     print("=" * 72)
 
@@ -292,7 +370,7 @@ def main():
         if run_claude:
             t0 = time.time()
             try:
-                c = claude_extract_products(path, args.model, args.think)
+                c = claude_extract_products(path, args.model, args.think, args.compact)
             except Exception as e:
                 print(f"  Claude 오류: {e}"); c = []
             ct = time.time() - t0
@@ -339,6 +417,17 @@ def main():
     print(f"  총 행수:  GPT {int(tot_g_rows)}  |  Claude {int(tot_c_rows)}")
     print(f"  항목 일치: 공통 {tot_common} · GPT만 {tot_g_only} · Claude만 {tot_c_only}")
     print(f"  총 시간:  GPT {tot_g_time:.1f}s  |  Claude {tot_c_time:.1f}s")
+
+    # ── Claude 비용 실측 (usage 기반) ──
+    if run_claude and (_USAGE["in"] or _USAGE["out"]):
+        pin, pout = PRICING.get(args.model, (0, 0))
+        cost = _USAGE["in"] / 1e6 * pin + _USAGE["out"] / 1e6 * pout
+        n = len(images) or 1
+        print("-" * 72)
+        print(f"  Claude 토큰:  입력 {_USAGE['in']:,}  ·  출력 {_USAGE['out']:,}  ({args.model})")
+        print(f"  Claude 비용:  이번 {len(images)}장 ≈ ${cost:.3f}  "
+              f"(장당 ${cost/n:.3f})")
+        print(f"  일 150장 환산 ≈ ${cost/n*150:.2f}/일  ·  월 ≈ ${cost/n*150*30:.0f}/월")
     print("=" * 72)
     print("  ※ 행수·항목차이는 정확도의 대략 지표일 뿐, 최종 판단은 원본 대조가 필요합니다.")
     print("     아래 xlsx 의 '항목차이' 시트에서 각 엔진만 잡은 품목을 원본과 대조하세요.")
