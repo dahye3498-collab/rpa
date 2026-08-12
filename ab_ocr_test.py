@@ -88,6 +88,20 @@ def parse_json_loose(text: str) -> dict:
     return {}
 
 
+def salvage_objects(text: str) -> list:
+    """잘린/깨진 JSON에서 완결된 {..} 행 객체만 개별 파싱해 복구.
+    (max_tokens 초과 등으로 배열이 미완결일 때 부분이라도 살림)"""
+    out = []
+    for m in re.findall(r"\{[^{}]*\}", text or ""):
+        try:
+            o = json.loads(m)
+        except Exception:
+            continue
+        if isinstance(o, dict) and "품목" in o:
+            out.append(o)
+    return out
+
+
 # ── Claude OCR (batch_processor의 GPT 경로와 동일 조건) ───────
 import anthropic
 _aclient = None
@@ -107,9 +121,11 @@ _CLAUDE_SYS = (
 
 
 def claude_ocr_from_b64(b64, media_type, prompt, response_key, model, think=False):
+    # max_tokens 16000: 밀집표(수십 행) JSON이 잘리지 않게 넉넉히.
+    # 16k는 비스트리밍 HTTP 타임아웃 경계라 스트리밍으로 호출.
     kwargs = dict(
         model=model,
-        max_tokens=8000,
+        max_tokens=16000,
         system=_CLAUDE_SYS,
         messages=[{
             "role": "user",
@@ -122,10 +138,19 @@ def claude_ocr_from_b64(b64, media_type, prompt, response_key, model, think=Fals
     kwargs["thinking"] = {"type": "adaptive"} if think else {"type": "disabled"}
     for attempt in range(1, 4):
         try:
-            resp = aclient().messages.create(**kwargs)
+            with aclient().messages.stream(**kwargs) as st:
+                resp = st.get_final_message()
             text = "".join(b.text for b in resp.content if b.type == "text")
             data = parse_json_loose(text)
-            val = data.get(response_key, [])
+            val = data.get(response_key) if isinstance(data, dict) else None
+            if isinstance(val, list) and val:
+                return val
+            # JSON이 잘렸거나 파싱 실패 → 완결 행만 복구
+            sal = salvage_objects(text)
+            if sal:
+                if resp.stop_reason == "max_tokens":
+                    print(f"  [claude 출력 잘림 복구: {len(sal)}행]", flush=True)
+                return sal
             return val if isinstance(val, list) else []
         except Exception as e:
             print(f"  [claude 재시도 {attempt}/3] {e}", flush=True)
@@ -202,12 +227,16 @@ def main():
     ap.add_argument("--files", nargs="*", default=None)
     ap.add_argument("--model", default="claude-sonnet-5")
     ap.add_argument("--think", action="store_true")
+    ap.add_argument("--engine", choices=["both", "claude", "gpt"], default="both",
+                    help="both=둘 다 실행 / claude=Claude만(이전 GPT결과 재사용) / gpt=GPT만")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
-    if not os.getenv("OPENAI_API_KEY"):
+    run_gpt = args.engine in ("both", "gpt")
+    run_claude = args.engine in ("both", "claude")
+    if run_gpt and not os.getenv("OPENAI_API_KEY"):
         print("❌ .env 에 OPENAI_API_KEY 가 없습니다."); sys.exit(1)
-    if not os.getenv("ANTHROPIC_API_KEY"):
+    if run_claude and not os.getenv("ANTHROPIC_API_KEY"):
         print("❌ .env 에 ANTHROPIC_API_KEY 가 없습니다. Anthropic 콘솔에서 키를 발급받아 추가하세요.")
         print("   (예:  ANTHROPIC_API_KEY=sk-ant-...  를 .env 에 한 줄 추가)")
         sys.exit(1)
@@ -222,8 +251,20 @@ def main():
     os.makedirs(SCRATCH, exist_ok=True)
     out_prefix = args.out or os.path.join(SCRATCH, f"ab_ocr_{date}")
 
+    # 한쪽만 실행할 때 반대편은 이전 결과 json 에서 재사용
+    prior = {}
+    if not (run_gpt and run_claude):
+        jprev = out_prefix + ".json"
+        if os.path.exists(jprev):
+            try:
+                with open(jprev, encoding="utf-8") as f:
+                    prior = json.load(f)
+                print(f"ℹ️ 이전 결과 재사용: {jprev}")
+            except Exception:
+                prior = {}
+
     print("=" * 72)
-    print(f"  품목표 OCR A/B  |  gpt-4.1  vs  {args.model}  (think={args.think})")
+    print(f"  품목표 OCR A/B  |  gpt-4.1  vs  {args.model}  (think={args.think}, engine={args.engine})")
     print(f"  날짜 {date}  ·  이미지 {len(images)}장")
     print("=" * 72)
 
@@ -235,20 +276,29 @@ def main():
         name = re.sub(r"_\d+\.png$", "", os.path.basename(path))
         print(f"\n[{idx}/{len(images)}] {name}")
 
-        t0 = time.time()
-        try:
-            g = bp.extract_data_from_image(path, "품목표")
-            g = g if isinstance(g, list) else []
-        except Exception as e:
-            print(f"  GPT 오류: {e}"); g = []
-        gt = time.time() - t0
+        if run_gpt:
+            t0 = time.time()
+            try:
+                g = bp.extract_data_from_image(path, "품목표")
+                g = g if isinstance(g, list) else []
+            except Exception as e:
+                print(f"  GPT 오류: {e}"); g = []
+            gt = time.time() - t0
+        else:
+            g = prior.get(name, {}).get("gpt", []) or []
+            gt = 0.0
+            print(f"  (GPT 이전결과 재사용: {len(g)}행)")
 
-        t0 = time.time()
-        try:
-            c = claude_extract_products(path, args.model, args.think)
-        except Exception as e:
-            print(f"  Claude 오류: {e}"); c = []
-        ct = time.time() - t0
+        if run_claude:
+            t0 = time.time()
+            try:
+                c = claude_extract_products(path, args.model, args.think)
+            except Exception as e:
+                print(f"  Claude 오류: {e}"); c = []
+            ct = time.time() - t0
+        else:
+            c = prior.get(name, {}).get("claude", []) or []
+            ct = 0.0
 
         gk = {}
         for r in g:
