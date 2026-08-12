@@ -12,3 +12,4 @@ diag_*.py
 
 # 로컬 서버/터널 로그
 *.log
+ab_ocr_out/
