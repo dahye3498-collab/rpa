@@ -10,6 +10,7 @@ product_search.py — 품목표 데이터 검색 엔진
 import os
 import re
 import glob
+import difflib
 import pandas as pd
 
 try:
@@ -92,6 +93,65 @@ def expand_query(q: str) -> set:
     return terms
 
 
+# ── 한글 자모 분해 기반 퍼지(오타) 매칭 ──
+_CHO = list("ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ")
+_JUNG = list("ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ")
+_JONG = [""] + list("ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ")
+
+
+def _decompose(s) -> str:
+    """한글 음절을 자모로 분해(오타 1~2글자 차이를 잘 잡기 위함). 비한글은 소문자."""
+    out = []
+    for ch in str(s):
+        c = ord(ch)
+        if 0xAC00 <= c <= 0xD7A3:
+            i = c - 0xAC00
+            out.append(_CHO[i // 588])
+            out.append(_JUNG[(i % 588) // 28])
+            j = i % 28
+            if j:
+                out.append(_JONG[j])
+        elif not ch.isspace():
+            out.append(ch.lower())
+    return "".join(out)
+
+
+_fuzzy_cache = {"sig": None, "vals": [], "decomp": []}
+
+
+def _distinct_values():
+    """검색 대상 고유값(품목·브랜드) 목록 캐시 (데이터 변경 시 갱신)."""
+    sig = _db_signature()
+    if _fuzzy_cache["sig"] == sig and _fuzzy_cache["vals"]:
+        return _fuzzy_cache
+    vals = set()
+    for r in load_rows():
+        for k in ("품목", "브랜드"):
+            v = str(r.get(k, "")).strip()
+            if 2 <= len(v) <= 24:
+                vals.add(v)
+    vals = sorted(vals)
+    _fuzzy_cache.update(sig=sig, vals=vals, decomp=[_decompose(v) for v in vals])
+    return _fuzzy_cache
+
+
+def fuzzy_matches(q: str, cutoff: float = 0.82, limit: int = 12) -> list:
+    """검색어와 자모 유사도가 높은 실제 품목/브랜드 값을 반환(오타 보정)."""
+    dq = _decompose(q)
+    if len(dq) < 3:
+        return []
+    dc = _distinct_values()
+    scored = []
+    for v, dv in zip(dc["vals"], dc["decomp"]):
+        if not dv:
+            continue
+        ratio = difflib.SequenceMatcher(None, dq, dv).ratio()
+        if ratio >= cutoff:
+            scored.append((ratio, v))
+    scored.sort(reverse=True)
+    return [v for _, v in scored[:limit]]
+
+
 _cache = {"sig": None, "rows": []}
 
 
@@ -156,6 +216,10 @@ def search(q: str = "", warehouse: str = "", origin: str = "",
     """
     rows = load_rows()
     terms = expand_query(q) if q else None
+    # 오타 보정: 검색어와 자모 유사한 실제 품목/브랜드도 검색어에 포함
+    if q and terms is not None:
+        for m in fuzzy_matches(q):
+            terms |= expand_query(m)
     wq, oq, bq = _norm(warehouse), _norm(origin), _norm(brand)
     field = field if field in SEARCH_FIELDS else "품목"
 
