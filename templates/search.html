@@ -35,6 +35,8 @@
   a.shot { color:var(--accent); text-decoration:none; }
   .empty { color:var(--sub); padding:30px; text-align:center; }
   .hint { color:var(--sub); font-size:12px; margin-top:6px; }
+  .exactlbl { color:var(--sub); font-size:13px; display:flex; align-items:center; gap:5px; cursor:pointer; white-space:nowrap; user-select:none; }
+  .exactlbl input { width:15px; height:15px; cursor:pointer; }
 </style>
 </head>
 <body>
@@ -60,6 +62,9 @@
     <input type="text" id="warehouse" placeholder="창고 필터 (예: 강동1)">
     <input type="text" id="origin" placeholder="원산지 (예: 미국)">
     <input type="text" id="brand" placeholder="브랜드 (예: EXCEL)">
+    <label class="exactlbl" title="켜면 품목/브랜드를 앞단어로 정확히 매칭 — '전지' 검색 시 '목전지' 제외">
+      <input type="checkbox" id="exact"> 정확히 일치
+    </label>
     <button id="go">검색</button>
     <button class="ghost" id="clear">초기화</button>
   </div>
@@ -115,6 +120,7 @@ async function doSearch(){
     warehouse:$('#warehouse').value.trim(),
     origin:$('#origin').value.trim(),
     brand:$('#brand').value.trim(),
+    exact:$('#exact').checked ? '1' : '',
   });
   lastTerms = q ? q.split(/\s+/) : [];
   $('#meta').textContent = '검색 중…';
@@ -146,8 +152,9 @@ async function doSearch(){
 }
 
 $('#go').onclick = doSearch;
-$('#clear').onclick = ()=>{ ['#q','#warehouse','#origin','#brand'].forEach(s=>$(s).value=''); $('#field').value='전체'; $('#recent').value='3'; doSearch(); };
+$('#clear').onclick = ()=>{ ['#q','#warehouse','#origin','#brand'].forEach(s=>$(s).value=''); $('#field').value='전체'; $('#recent').value='3'; $('#exact').checked=false; doSearch(); };
 $('#recent').addEventListener('change', doSearch);
+$('#exact').addEventListener('change', doSearch);
 $('#q').addEventListener('keydown', e=>{ if(e.key==='Enter') doSearch(); });
 ['#warehouse','#origin','#brand'].forEach(s=>$(s).addEventListener('keydown',e=>{ if(e.key==='Enter') doSearch(); }));
 document.querySelectorAll('.chip').forEach(c=>c.onclick=()=>{ $('#q').value=c.dataset.q; doSearch(); });

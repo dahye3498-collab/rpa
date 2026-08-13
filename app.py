@@ -50,7 +50,8 @@ def api_search():
         recent = int(request.args.get("recent", "3"))
     except ValueError:
         recent = 3
-    res = product_search.search(q, warehouse, origin, brand, field, limit=1000, recent=recent)
+    exact = request.args.get("exact", "").strip() in ("1", "true", "yes", "on")
+    res = product_search.search(q, warehouse, origin, brand, field, limit=1000, recent=recent, exact=exact)
     # 판매가는 비공개 → 응답에서 제외 (캐시 원본은 보존하기 위해 복사본 생성)
     HIDE = {"판매가_원"}
     results = [{k: v for k, v in r.items() if k not in HIDE} for r in res["results"]]

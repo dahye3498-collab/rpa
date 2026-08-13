@@ -54,6 +54,47 @@ def _norm(s) -> str:
     return re.sub(r"\s+", "", str(s if s is not None else "")).lower()
 
 
+# exact(정확히 일치) 모드에서 품목/브랜드는 '낱말' 매칭, 부가필드는 부분일치 유지
+_AUX_FIELDS = ("축종", "원산지", "보관", "등급", "EST", "스펙_설명",
+               "재고_box", "창고", "소비기한", "수정일", "비고")
+
+
+def _word_match(term: str, value) -> bool:
+    """term이 value(품목/브랜드)와 '한 낱말'로 맞는지 — 완전일치 또는 접두일치.
+    내부/접미 부분일치는 제외 → '전지'가 '목전지'에는 안 걸림('전지','전지살'은 걸림)."""
+    v = _norm(value)
+    if not term or not v:
+        return False
+    return v == term or v.startswith(term)
+
+
+def _match_terms(r: dict, terms: set, field: str, exact: bool) -> bool:
+    """행 r 이 검색어 terms 에 매칭되는지. exact=False면 기존 부분일치."""
+    if not exact:
+        if field == "전체":
+            hay = _norm(" ".join(str(v) for k, v in r.items() if k != "파일명"))
+        else:
+            hay = _norm(r.get(field, ""))
+        return any(t and t in hay for t in terms)
+
+    # exact 모드: 품목/브랜드는 낱말(완전/접두) 일치
+    def hit_item(val):
+        return any(_word_match(t, val) for t in terms)
+
+    if field == "품목":
+        return hit_item(r.get("품목", ""))
+    if field == "브랜드":
+        return hit_item(r.get("브랜드", ""))
+    if field in ("창고", "원산지", "등급"):
+        hay = _norm(r.get(field, ""))
+        return any(t and t in hay for t in terms)
+    # 전체: 품목·브랜드는 낱말 일치, 그 외 부가필드는 부분일치
+    if hit_item(r.get("품목", "")) or hit_item(r.get("브랜드", "")):
+        return True
+    aux = _norm(" ".join(str(r.get(k, "")) for k in _AUX_FIELDS))
+    return any(t and t in aux for t in terms)
+
+
 # ── 소스데이터 동의어 그룹 로드 (품목/브랜드/축종) ──
 SOURCE_XLSX = os.path.join(BASE_DIR, "[운영] 자동변환_소스데이터.xlsx")
 
@@ -209,9 +250,10 @@ def recent_dates(n: int) -> list:
 
 def search(q: str = "", warehouse: str = "", origin: str = "",
            brand: str = "", field: str = "전체", limit: int = 1000,
-           recent: int = 3) -> dict:
+           recent: int = 3, exact: bool = False) -> dict:
     """
     품목 검색. recent=최근 수집일 N개만 조회(기본 3, 0이면 전체).
+    exact=True면 품목/브랜드를 낱말(완전/접두) 일치로 검색 (예: '전지'에 '목전지' 제외).
     반환: {"count": 전체매칭수, "results": [행,...] (limit까지), "dates": 조회된 날짜}
     """
     rows = load_rows()
@@ -230,11 +272,7 @@ def search(q: str = "", warehouse: str = "", origin: str = "",
         if allowed is not None and str(r.get("수집일", "")) not in allowed:
             continue
         if terms:
-            if field == "전체":
-                hay = _norm(" ".join(str(v) for k, v in r.items() if k not in ("파일명",)))
-            else:
-                hay = _norm(r.get(field, ""))
-            if not any(t and t in hay for t in terms):
+            if not _match_terms(r, terms, field, exact):
                 continue
         if wq and wq not in _norm(r.get("창고", "")):
             continue
