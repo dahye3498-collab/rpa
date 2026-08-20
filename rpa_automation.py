@@ -256,10 +256,17 @@ def ensure_board(page, target_board_selector: str, direct_url: str, timeout_sec:
 
     return board_detected
 
-def extract_board_posts_text(board_frame, board_name: str, text_dir: str, target_date: datetime = None) -> list:
+def extract_board_posts_text(board_frame, board_name: str, text_dir: str,
+                             target_date: datetime = None,
+                             start_date=None, end_date=None) -> list:
     """
     텍스트 기반 게시판(구매/판매/회원정보/등업신청)에서 게시글 텍스트를 직접 추출합니다.
     스크린샷 대신 텍스트를 복사하여 리스트로 반환합니다.
+
+    - target_date(단일 날짜): 그 날짜 글만 수집(기존 동작).
+    - start_date/end_date(date, 범위): [start, end] 사이 글 전부 수집.
+      예: 2026년 전체 = start_date=date(2026,1,1), end_date=오늘.
+      범위 모드에서 start 이전 글이 5개 연속 나오면 순회 중단.
     """
     log(f"1단계: [{board_name}] 텍스트 수집을 시작합니다.")
     os.makedirs(text_dir, exist_ok=True)
@@ -297,28 +304,39 @@ def extract_board_posts_text(board_frame, board_name: str, text_dir: str, target
                     title = link_loc.inner_text().strip()
                     date_str = row.locator("span.tbl_txt_date").inner_text().strip()
 
-                    p_date = parse_date(date_str)
-                    collect_date = target_date.date() if target_date else datetime.now().date()
+                    p_date = parse_date(date_str).date()
 
-                    if p_date.date() < collect_date:
+                    if start_date and end_date:
+                        # 범위 모드: [start_date, end_date] 사이만 수집
+                        if p_date < start_date:
+                            found_target_or_older = True
+                            consecutive_old_posts += 1
+                            if consecutive_old_posts >= 5:
+                                log(f"[{board_name}] 범위 이전 글 5개 연속 → 순회 중단 (날짜: {date_str})")
+                                stop_searching = True
+                                break
+                            continue
+                        if p_date > end_date:
+                            continue
                         found_target_or_older = True
-                        consecutive_old_posts += 1
-                        if consecutive_old_posts >= 5:
-                            log(f"[{board_name}] 과거 글 5개 초과 발견으로 중단합니다. (날짜: {date_str})")
-                            stop_searching = True
-                            break
-                        continue
-
-                    if p_date.date() > collect_date:
-                        continue
-
-                    found_target_or_older = True
-                    consecutive_old_posts = 0
-
-                    current_page_posts.append({
-                        "title": title,
-                        "date": date_str,
-                    })
+                        consecutive_old_posts = 0
+                        current_page_posts.append({"title": title, "date": date_str})
+                    else:
+                        # 단일 날짜 모드(기존)
+                        collect_date = target_date.date() if target_date else datetime.now().date()
+                        if p_date < collect_date:
+                            found_target_or_older = True
+                            consecutive_old_posts += 1
+                            if consecutive_old_posts >= 5:
+                                log(f"[{board_name}] 과거 글 5개 초과 발견으로 중단합니다. (날짜: {date_str})")
+                                stop_searching = True
+                                break
+                            continue
+                        if p_date > collect_date:
+                            continue
+                        found_target_or_older = True
+                        consecutive_old_posts = 0
+                        current_page_posts.append({"title": title, "date": date_str})
             except:
                 continue
 
@@ -778,7 +796,7 @@ def capture_recent_posts(page, board_name, vision_meat_root, start_date,
 
 
 def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, credentials=None,
-            max_posts=None):
+            max_posts=None, text_range=None):
     """
     캡처 RPA를 실행합니다.
 
@@ -1006,10 +1024,42 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
                     },
                 )
 
-        # 3-2) 텍스트 게시판: 날짜별 순차 방식
+        # 3-2) 텍스트 게시판 — 범위(연도 등) 모드: 게시판 1회 순회로 [lo, hi] 전부 수집
+        if text_boards and text_range:
+            lo, hi = text_range
+            yr = lo.year
+            for b in text_boards:
+                if check_pause_stop:
+                    check_pause_stop()
+                log(f"\n===== [{b['name']}] {yr}년 범위 텍스트 수집 ({lo} ~ {hi}) =====")
+                ok = ensure_board(page, b["selector"], b["url"], timeout_sec=30)
+                if not ok:
+                    log(f"[{b['name']}] 게시판 진입 실패. 다음 게시판으로 넘어갑니다.")
+                    continue
+                board_frame = page.frame_locator("iframe#down")
+                base = os.path.join(vision_meat_root, f"{yr}_전체", b["name"])
+                text_data = extract_board_posts_text(
+                    board_frame, b["name"], os.path.join(base, "text_data"),
+                    start_date=lo, end_date=hi,
+                )
+                if text_data:
+                    excel_dir = os.path.join(base, "excel")
+                    os.makedirs(excel_dir, exist_ok=True)
+                    df = pd.DataFrame(text_data)
+                    fn = f"{yr}_{b['name']}_데이터.xlsx"
+                    df.to_excel(os.path.join(excel_dir, fn), index=False)
+                    db_dir = os.path.join(vision_meat_root, "database")
+                    os.makedirs(db_dir, exist_ok=True)
+                    df.to_excel(os.path.join(db_dir, fn), index=False)
+                    log(f"[{b['name']}] Excel 저장 완료: {fn} ({len(text_data)}건)")
+                all_captured.extend(
+                    [{"board": b["name"], "title": d["제목"], "date": d["작성일"]} for d in text_data]
+                )
+
+        # 3-2b) 텍스트 게시판: 날짜별 순차 방식 (범위 미지정 시)
         total_dates = len(date_list)
         for date_idx, target_date in enumerate(date_list, 1):
-            if not text_boards:
+            if not text_boards or text_range:
                 break
             if check_pause_stop:
                 check_pause_stop()
