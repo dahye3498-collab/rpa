@@ -6,6 +6,14 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 from openai import OpenAI
+import pandas as pd
+
+try:
+    from PIL import Image
+    from io import BytesIO
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
 
 load_dotenv()
 
@@ -20,9 +28,14 @@ LOGIN_PWD = os.getenv("LOGIN_PWD")
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL_PATH = os.path.join(BASE_DIR, "ref", "국제식품_상품목록.xlsx")
 DB_DIR = os.path.join(BASE_DIR, "visionmeat", "database")
+# 로그인 세션 저장(persistent). 회원 크롤러(rpa_members)와 공유 → 반복 로그인 방지
+SESSION_DIR = os.path.join(BASE_DIR, "browser_session")
 # Dynamic filename: YYMMDD_미트피플_데이터.xlsx
 OUTPUT_FILENAME = f"{datetime.now().strftime('%y%m%d')}_미트피플_데이터.xlsx"
 OUTPUT_PATH = os.path.join(DB_DIR, OUTPUT_FILENAME)
+
+# 텍스트만 추출하는 게시판 (스크린샷+OCR 대신 텍스트 복사 → Excel 직접 저장)
+TEXT_BOARDS = {"구매", "판매", "회원정보", "등업신청"}
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -50,7 +63,7 @@ def get_missing_dates() -> list:
     vision_meat_root = os.path.join(BASE_DIR, "visionmeat")
     os.makedirs(vision_meat_root, exist_ok=True)
 
-    CAPTURE_BOARDS = ["구매", "판매", "품목표"]
+    CAPTURE_BOARDS = ["구매", "판매", "품목표", "회원정보", "등업신청"]
 
     existing_dates = set()
     if os.path.isdir(vision_meat_root):
@@ -63,20 +76,31 @@ def get_missing_dates() -> list:
             except ValueError:
                 continue  # YYYY-MM-DD 형식이 아닌 폴더는 무시
 
-            # ✅ 핵심 수정: 폴더 존재 여부가 아닌 스크린샷 존재 여부로 판단
-            # 하나라도 스크린샷이 있으면 "캡처 완료" 날짜로 간주
-            has_any_screenshot = False
+            # 폴더 존재 여부가 아닌 실제 데이터 존재 여부로 판단
+            has_any_data = False
             for board in CAPTURE_BOARDS:
-                cap_dir = os.path.join(entry_path, board, "screenshots")
-                if os.path.isdir(cap_dir):
-                    if any(
-                        f.lower().endswith((".png", ".jpg", ".jpeg"))
-                        for f in os.listdir(cap_dir)
-                    ):
-                        has_any_screenshot = True
+                if board in TEXT_BOARDS:
+                    # 텍스트 게시판: text_data.json 또는 excel 존재 여부
+                    text_file = os.path.join(entry_path, board, "text_data", "text_data.json")
+                    excel_dir = os.path.join(entry_path, board, "excel")
+                    if os.path.exists(text_file):
+                        has_any_data = True
                         break
+                    if os.path.isdir(excel_dir) and any(f.endswith(".xlsx") for f in os.listdir(excel_dir)):
+                        has_any_data = True
+                        break
+                else:
+                    # 스크린샷 게시판 (품목표)
+                    cap_dir = os.path.join(entry_path, board, "screenshots")
+                    if os.path.isdir(cap_dir):
+                        if any(
+                            f.lower().endswith((".png", ".jpg", ".jpeg"))
+                            for f in os.listdir(cap_dir)
+                        ):
+                            has_any_data = True
+                            break
 
-            if has_any_screenshot:
+            if has_any_data:
                 existing_dates.add(d.date())
 
     today = datetime.now().date()
@@ -232,14 +256,22 @@ def ensure_board(page, target_board_selector: str, direct_url: str, timeout_sec:
 
     return board_detected
 
-def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_date: datetime = None) -> list:
+def extract_board_posts_text(board_frame, board_name: str, text_dir: str,
+                             target_date: datetime = None,
+                             start_date=None, end_date=None) -> list:
     """
-    특정 게시판(이미 진입된 상태)에서 오늘 글만 캡쳐 저장.
-    """
-    log(f"1단계: [{board_name}] 스크린샷 수집을 시작합니다.")
-    os.makedirs(capture_dir, exist_ok=True)
+    텍스트 기반 게시판(구매/판매/회원정보/등업신청)에서 게시글 텍스트를 직접 추출합니다.
+    스크린샷 대신 텍스트를 복사하여 리스트로 반환합니다.
 
-    captured_data = []
+    - target_date(단일 날짜): 그 날짜 글만 수집(기존 동작).
+    - start_date/end_date(date, 범위): [start, end] 사이 글 전부 수집.
+      예: 2026년 전체 = start_date=date(2026,1,1), end_date=오늘.
+      범위 모드에서 start 이전 글이 5개 연속 나오면 순회 중단.
+    """
+    log(f"1단계: [{board_name}] 텍스트 수집을 시작합니다.")
+    os.makedirs(text_dir, exist_ok=True)
+
+    extracted_data = []
     page_num = 1
     stop_searching = False
 
@@ -247,14 +279,12 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
         log(f"[{board_name}] 게시글 목록(페이지 {page_num}) 검사 중...")
 
         try:
-            # 게시글 목록이 보일 때까지 대기
             board_frame.locator("a.txt_item").first.wait_for(timeout=10000)
         except:
             log(f"[{board_name}] 게시글 목록을 찾을 수 없습니다. (데이터 없음)")
             break
 
         rows = board_frame.locator("tr").all()
-        # 실제 데이터 행이 있는지 다시 확인
         if not rows:
             break
 
@@ -264,7 +294,6 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
 
         for row in rows:
             try:
-                # 공지사항 제외
                 is_notice = row.locator(".ico_notice, .txt_notice, .txt_pill").count() > 0 or \
                             "공지" in row.inner_text() or "필독" in row.inner_text()
                 if is_notice:
@@ -275,72 +304,83 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
                     title = link_loc.inner_text().strip()
                     date_str = row.locator("span.tbl_txt_date").inner_text().strip()
 
-                    p_date = parse_date(date_str)
-                    # target_date가 없으면 오늘 기준
-                    collect_date = target_date.date() if target_date else datetime.now().date()
+                    p_date = parse_date(date_str).date()
 
-                    # 수집 대상 날짜의 글만 수집
-                    if p_date.date() < collect_date:
+                    if start_date and end_date:
+                        # 범위 모드: [start_date, end_date] 사이만 수집
+                        if p_date < start_date:
+                            found_target_or_older = True
+                            consecutive_old_posts += 1
+                            if consecutive_old_posts >= 5:
+                                log(f"[{board_name}] 범위 이전 글 5개 연속 → 순회 중단 (날짜: {date_str})")
+                                stop_searching = True
+                                break
+                            continue
+                        if p_date > end_date:
+                            continue
                         found_target_or_older = True
-                        consecutive_old_posts += 1
-                        if consecutive_old_posts >= 5:
-                            log(f"[{board_name}] 과거 글 5개 초과 발견으로 중단합니다. (날짜: {date_str})")
-                            stop_searching = True
-                            break
-                        continue
-
-                    if p_date.date() > collect_date:
-                        # 수집 대상보다 미래 날짜면 스킵 (과거글 카운터 리셋하지 않음)
-                        continue
-
-                    found_target_or_older = True
-                    consecutive_old_posts = 0
-                    safe_title = "".join([c for c in title if c.isalnum() or c in (' ', '_', '-')]).strip().replace(' ', '_')
-                    
-                    # 중복 캡쳐 방지 (오늘 날짜 폴더 내 파일 존재 여부)
-                    existing_files = [f for f in os.listdir(capture_dir) if f.startswith(safe_title) and f.endswith(".png")]
-                    if existing_files:
-                        log(f"[{board_name}] 이미 캡처된 게시글 스킵: {title}")
-                        continue
-
-                    current_page_posts.append({
-                        "title": title,
-                        "date": date_str,
-                        "safe_title": safe_title
-                    })
+                        consecutive_old_posts = 0
+                        current_page_posts.append({"title": title, "date": date_str})
+                    else:
+                        # 단일 날짜 모드(기존)
+                        collect_date = target_date.date() if target_date else datetime.now().date()
+                        if p_date < collect_date:
+                            found_target_or_older = True
+                            consecutive_old_posts += 1
+                            if consecutive_old_posts >= 5:
+                                log(f"[{board_name}] 과거 글 5개 초과 발견으로 중단합니다. (날짜: {date_str})")
+                                stop_searching = True
+                                break
+                            continue
+                        if p_date > collect_date:
+                            continue
+                        found_target_or_older = True
+                        consecutive_old_posts = 0
+                        current_page_posts.append({"title": title, "date": date_str})
             except:
                 continue
 
         if not current_page_posts and not stop_searching:
             if found_target_or_older:
-                # 대상 날짜 이하의 글이 이미 나왔는데 수집할 게 없으면 종료
-                log(f"[{board_name}] 현재 페이지에 오늘 작성된 글이 없습니다.")
+                log(f"[{board_name}] 현재 페이지에 대상 날짜 글이 없습니다.")
                 stop_searching = True
             else:
-                # 아직 미래 글만 나옴 → 다음 페이지에 대상 날짜 글이 있을 수 있음
                 log(f"[{board_name}] 대상 날짜 글이 아직 나오지 않음. 다음 페이지로 계속 탐색...")
 
         for post in current_page_posts:
-            log(f"[{board_name}] 캡처 작업 중: {post['title']}")
+            log(f"[{board_name}] 텍스트 추출 중: {post['title']}")
             try:
                 post_link = board_frame.locator("a.txt_item").filter(has_text=post['title']).first
                 post_link.click()
                 time.sleep(4)
 
+                # 게시글 본문 텍스트 추출
+                content_text = ""
                 content_area = board_frame.locator("#user_contents")
                 if content_area.count() > 0:
-                    timestamp = int(time.time())
-                    file_name = f"{post['safe_title']}_{timestamp}.png"
-                    file_path = os.path.join(capture_dir, file_name)
-                    content_area.screenshot(path=file_path)
-                    captured_data.append({
-                        "board": board_name,
-                        "local_path": file_path,
-                        "title": post['title'],
-                        "date": post['date']
-                    })
-                    log(f"[{board_name}] 저장 성공: {file_name}")
+                    content_text = content_area.inner_text().strip()
 
+                # 작성자 추출 시도
+                author = ""
+                try:
+                    for sel in [".txt_sub .txt_item", ".nick_txt", ".article_writer"]:
+                        author_loc = board_frame.locator(sel).first
+                        if author_loc.count() > 0 and author_loc.is_visible():
+                            author = author_loc.inner_text().strip()
+                            if author:
+                                break
+                except:
+                    pass
+
+                extracted_data.append({
+                    "제목": post['title'],
+                    "작성자": author,
+                    "작성일": post['date'],
+                    "내용": content_text,
+                })
+                log(f"[{board_name}] 텍스트 추출 완료: {post['title']}")
+
+                # 목록으로 돌아가기
                 list_btn = board_frame.locator("#article-list-btn").or_(
                     board_frame.get_by_role("link", name="목록", exact=True)
                 ).first
@@ -363,14 +403,406 @@ def capture_board_posts(board_frame, board_name: str, capture_dir: str, target_d
         else:
             break
 
+    # JSON으로 저장 (참조/백업용)
+    json_path = os.path.join(text_dir, "text_data.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(extracted_data, f, ensure_ascii=False, indent=2)
+
+    log(f"[{board_name}] 텍스트 수집 완료: {len(extracted_data)}건")
+    return extracted_data
+
+
+def _read_list_rows(page):
+    """
+    현재 iframe#down 목록의 게시글 행을 JS로 한 번에 읽어 (title, href, date) 리스트 반환.
+    공지/필독 제외. 타이밍 이슈를 피하기 위해 DOM을 한 번에 평가.
+    """
+    real_frame = page.frame(name="down")
+    if not real_frame:
+        return []
+    try:
+        return real_frame.evaluate("""
+            () => {
+                const rows = Array.from(document.querySelectorAll('tr'));
+                return rows
+                    .filter(row => {
+                        const link = row.querySelector('a.txt_item');
+                        if (!link) return false;
+                        if (/ico_notice|txt_notice|txt_pill/.test(row.innerHTML)) return false;
+                        const txt = row.innerText || '';
+                        if (txt.includes('공지') || txt.includes('필독')) return false;
+                        return true;
+                    })
+                    .map(row => {
+                        const link = row.querySelector('a.txt_item');
+                        const dateEl = row.querySelector('span.tbl_txt_date');
+                        return {
+                            title: link.innerText.trim(),
+                            href:  link.getAttribute('href') || '',
+                            date:  dateEl ? dateEl.innerText.trim() : ''
+                        };
+                    });
+            }
+        """)
+    except Exception as e:
+        log(f"목록 읽기 오류: {e}")
+        return []
+
+
+def _goto_next_page(page, board_frame, page_num) -> bool:
+    """
+    다음 페이지로 이동. 성공 True.
+    1) 숫자 버튼(a.link_num) 클릭
+    2) '다음' 그룹 버튼(button.btn_item.btn_next 등)을 실제 Frame JS로 클릭
+    """
+    try:
+        btn = board_frame.locator(f"a.link_num:has-text('{page_num + 1}')").first
+        if btn.count() > 0 and btn.is_visible():
+            btn.click()
+            time.sleep(3)
+            return True
+    except Exception:
+        pass
+
+    try:
+        rf = page.frame(name="down")
+        if rf:
+            clicked = rf.evaluate("""
+                () => {
+                    const sels = ['button.btn_item.btn_next','button.btn_g_ico.btn_item.btn_next',
+                                  'button[class*="btn_next"]','a.btn_next'];
+                    for (const s of sels) { const el = document.querySelector(s); if (el) { el.click(); return true; } }
+                    return false;
+                }
+            """)
+            if clicked:
+                time.sleep(3)
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
+def _wait_content_ready(page, timeout_sec=15):
+    """
+    #user_contents 스크린샷 전, 잘림 방지를 위해:
+      - 내부 이미지가 모두 로드 완료(complete && naturalHeight>0)
+      - 요소 높이(scrollHeight)가 연속 2회 동일(렌더 안정화)
+    될 때까지 대기. 실패해도 최소한의 대기 후 진행.
+    """
+    rf = page.frame(name="down")
+    if not rf:
+        page.wait_for_timeout(1800)
+        return
+    deadline = time.time() + timeout_sec
+    last_h, stable = -1, 0
+    while time.time() < deadline:
+        try:
+            info = rf.evaluate("""
+                () => {
+                    const uc = document.querySelector('#user_contents');
+                    if (!uc) return {h: 0, imgs: 0, loaded: 0};
+                    const imgs = Array.from(uc.querySelectorAll('img'));
+                    const loaded = imgs.filter(i => i.complete && i.naturalHeight > 0).length;
+                    return {h: uc.scrollHeight, imgs: imgs.length, loaded: loaded};
+                }
+            """)
+        except Exception:
+            break
+        h = info.get("h", 0)
+        imgs_ok = (info.get("imgs", 0) == 0) or (info.get("loaded", 0) >= info.get("imgs", 0))
+        if h > 0 and imgs_ok and h == last_h:
+            stable += 1
+            if stable >= 2:
+                break
+        else:
+            stable = 0
+        last_h = h
+        page.wait_for_timeout(400)
+    page.wait_for_timeout(300)
+
+
+def _download_content_images(page, out_path):
+    """
+    이미지형 품목표: #user_contents의 원본 이미지를 직접 다운로드해 저장.
+    (렌더 스크린샷 대신 원본 파일 → 잘림 없음, 화질 최상)
+    - 이미지 여러 개면 세로로 이어붙여 한 파일로 저장.
+    - 이미지가 없으면 False 반환(→ 호출부에서 스크린샷 폴백).
+    """
+    if not PIL_AVAILABLE:
+        return False
+    rf = page.frame(name="down")
+    if not rf:
+        return False
+    try:
+        info = rf.evaluate("""
+            () => {
+                const uc = document.querySelector('#user_contents');
+                if (!uc) return {trs: 0, imgs: []};
+                const imgs = Array.from(uc.querySelectorAll('img')).map(i => ({
+                    src: i.getAttribute('data-img-src') || i.src || '',
+                    nw: i.naturalWidth || 0, nh: i.naturalHeight || 0
+                })).filter(o => o.src && o.src.indexOf('data:') !== 0);
+                return {trs: uc.querySelectorAll('tr').length, imgs};
+            }
+        """)
+    except Exception:
+        return False
+
+    trs = (info or {}).get("trs", 0)
+    all_imgs = (info or {}).get("imgs", []) or []
+    # 로고/아이콘 제외: 충분히 큰 이미지만 '품목표 이미지'로 간주
+    big = [o for o in all_imgs if o.get("nh", 0) >= 400 and o.get("nw", 0) >= 300]
+    # 실질적인 표가 있으면(=텍스트 품목표) 스크린샷이 맞음, 큰 이미지 없어도 스크린샷
+    if trs >= 5 or not big:
+        return False
+    srcs = [o["src"] for o in big]
+
+    imgs = []
+    for s in srcs:
+        try:
+            r = page.request.get(s, timeout=30000)
+            if not r.ok:
+                continue
+            imgs.append(Image.open(BytesIO(r.body())).convert("RGB"))
+        except Exception:
+            continue
+    if not imgs:
+        return False
+
+    try:
+        if len(imgs) == 1:
+            imgs[0].save(out_path)
+        else:
+            W = max(i.width for i in imgs)
+            H = sum(i.height for i in imgs)
+            canvas = Image.new("RGB", (W, H), "white")
+            y = 0
+            for i in imgs:
+                canvas.paste(i, (0, y))
+                y += i.height
+            canvas.save(out_path)
+        return True
+    except Exception:
+        return False
+
+
+def _force_full_render(page):
+    """
+    세로로 긴 이미지/표에서 화면 밖 영역이 페인트되지 않아 아래가 백지로 잘리는 것 방지.
+    iframe 내용을 위→아래로 스크롤해 전체를 강제 렌더한 뒤 맨 위로 복귀.
+    """
+    rf = page.frame(name="down")
+    if not rf:
+        return
+    try:
+        rf.evaluate("""
+            async () => {
+                const total = document.body.scrollHeight;
+                const step = Math.max(400, window.innerHeight || 800);
+                for (let y = 0; y <= total; y += step) {
+                    window.scrollTo(0, y);
+                    await new Promise(r => setTimeout(r, 120));
+                }
+                window.scrollTo(0, 0);
+                await new Promise(r => setTimeout(r, 200));
+            }
+        """)
+    except Exception:
+        pass
+
+
+def _expand_content_width(page):
+    """
+    2단 레이아웃 등 본문이 컨테이너보다 넓을 때 오른쪽이 잘리는 것을 방지.
+    #user_contents 및 조상/내부 표·이미지의 폭 제약을 풀어 전체 폭이 렌더되게 함.
+    """
+    rf = page.frame(name="down")
+    if not rf:
+        return
+    try:
+        rf.evaluate("""
+            () => {
+                const uc = document.querySelector('#user_contents');
+                if (!uc) return;
+                // 조상들의 클리핑/폭 제약만 해제 (max-content 강제 X → 폭 폭발 방지)
+                let el = uc;
+                while (el && el !== document.body) {
+                    el.style.setProperty('overflow', 'visible', 'important');
+                    el.style.setProperty('max-width', 'none', 'important');
+                    el = el.parentElement;
+                }
+                document.documentElement.style.setProperty('overflow', 'visible', 'important');
+                document.body.style.setProperty('overflow', 'visible', 'important');
+                // #user_contents 박스를 '내용 전체 폭(scrollWidth)'만큼만 확장
+                const tbls = Array.from(uc.querySelectorAll('table')).map(t => t.scrollWidth || 0);
+                let need = Math.max(uc.scrollWidth || 0, ...tbls, 0);
+                if (need > 0) {
+                    need = Math.min(need + 4, 6000);  // 폭주 방지 상한
+                    uc.style.setProperty('width', need + 'px', 'important');
+                }
+            }
+        """)
+    except Exception:
+        pass
+
+
+def capture_recent_posts(page, board_name, vision_meat_root, start_date,
+                         max_posts=None, hooks=None, max_pages=80):
+    """
+    [기준일 ~ 오늘] 윈도우의 게시글을 스크린샷 캡처. 2단계 방식.
+
+      1) 목록 순회(캡처 없음): 최신순으로 페이지를 넘기며 start_date(포함) 이후 글의
+         (제목·href·날짜)를 수집. start_date보다 오래된 글 5개 연속 시 목록 순회 종료.
+      2) 본문 캡처: 수집한 href로 iframe#down을 직접 이동시켜 #user_contents 스크린샷.
+         목록 왕복이 없어 '목록 버튼이 1페이지로 튕기는' 문제가 없음.
+
+    각 글은 실제 작성일 폴더(<root>/YYYY-MM-DD/<board>/screenshots)에 저장.
+    이미 같은 제목의 png가 있으면 스킵(중복 방지).
+
+    - max_posts: 지정 시 그만큼만 수집/캡처(검증용).
+    """
+    hooks = hooks or {}
+    check_pause_stop = hooks.get("check_pause_stop")
+    board_frame = page.frame_locator("iframe#down")
+
+    # ── 1단계: 목록 순회하며 대상 글 수집 ──
+    log(f"[{board_name}] 1단계: 목록 순회 (기준일 {start_date} 이후 수집)")
+    worklist = []
+    seen_keys = set()
+    consecutive_old = 0
+    page_num = 1
+
+    while page_num <= max_pages:
+        if check_pause_stop:
+            check_pause_stop()
+
+        try:
+            board_frame.locator("a.txt_item").first.wait_for(timeout=10000)
+        except Exception:
+            log(f"[{board_name}] 목록 없음 → 순회 종료")
+            break
+
+        items = _read_list_rows(page)
+        if not items:
+            log(f"[{board_name}] 목록 비어있음 → 순회 종료")
+            break
+
+        stop = False
+        added = 0
+        for it in items:
+            date_str = it.get("date", "")
+            title = it.get("title", "")
+            href = it.get("href", "")
+            try:
+                p_date = parse_date(date_str).date()
+            except Exception:
+                continue
+
+            if p_date < start_date:
+                consecutive_old += 1
+                if consecutive_old >= 5:
+                    log(f"[{board_name}] 기준일 이전 글 5개 연속 → 목록 순회 종료 (날짜: {date_str})")
+                    stop = True
+                    break
+                continue
+
+            consecutive_old = 0
+            key = (title, date_str)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            worklist.append({"title": title, "href": href, "date": date_str, "p_date": p_date})
+            added += 1
+            if max_posts is not None and len(worklist) >= max_posts:
+                stop = True
+                break
+
+        log(f"[{board_name}] p{page_num}: 대상 {added}건 (누적 {len(worklist)})")
+        if stop:
+            break
+
+        if not _goto_next_page(page, board_frame, page_num):
+            log(f"[{board_name}] 마지막 페이지(p{page_num}) → 순회 종료")
+            break
+        page_num += 1
+
+    log(f"[{board_name}] 대상 글 총 {len(worklist)}건. 2단계 캡처 시작...")
+
+    # ── 2단계: href로 본문 이동 후 스크린샷 ──
+    captured_data = []
+    for idx, post in enumerate(worklist, 1):
+        if max_posts is not None and len(captured_data) >= max_posts:
+            break
+        if check_pause_stop:
+            check_pause_stop()
+
+        date_folder = post["p_date"].strftime("%Y-%m-%d")
+        capture_dir = os.path.join(vision_meat_root, date_folder, board_name, "screenshots")
+        os.makedirs(capture_dir, exist_ok=True)
+
+        safe_title = "".join(c for c in post["title"] if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
+        existing = [f for f in os.listdir(capture_dir) if f.startswith(safe_title) and f.endswith(".png")]
+        if existing:
+            log(f"[{board_name}] 이미 캡처됨 스킵: {post['title']}")
+            continue
+
+        href = post["href"]
+        if not href or href.startswith("javascript"):
+            log(f"[{board_name}] href 없음 스킵: {post['title']}")
+            continue
+        full_url = ("https://cafe.daum.net" + href) if href.startswith("/") else href
+
+        log(f"[{board_name}] 캡처 {idx}/{len(worklist)}: {post['title']} ({date_folder})")
+        try:
+            rf = page.frame(name="down")
+            if not rf:
+                log(f"[{board_name}] iframe 접근 실패 → 스킵")
+                continue
+            # iframe 내부에서 본문 페이지로 이동 (조회수는 증가하지만 스크린샷 필요)
+            rf.evaluate("(u) => { window.location.href = u; }", full_url)
+            page.wait_for_timeout(2000)
+
+            content_area = board_frame.locator("#user_contents")
+            content_area.first.wait_for(timeout=12000)
+            # 잘림 방지: 이미지 로드 완료 + 높이 안정화까지 대기
+            _wait_content_ready(page, timeout_sec=15)
+
+            timestamp = int(time.time())
+            file_name = f"{safe_title}_{timestamp}.png"
+            file_path = os.path.join(capture_dir, file_name)
+
+            # 이미지형 품목표 → 원본 이미지 직접 다운로드(잘림 없음)
+            # HTML표형 → 순수 스크린샷 (표는 완전 렌더되므로 잘림 없음; 스타일 조작은
+            #            초대형 표 캡처를 깨뜨려 오히려 실패시키므로 하지 않음)
+            if _download_content_images(page, file_path):
+                log(f"[{board_name}] 원본 이미지 저장: {file_name}")
+            else:
+                content_area.first.screenshot(path=file_path)
+                log(f"[{board_name}] 스크린샷 저장: {file_name}")
+
+            captured_data.append({
+                "board": board_name,
+                "local_path": file_path,
+                "title": post["title"],
+                "date": post["date"],
+            })
+        except Exception as e:
+            log(f"[{board_name}] 게시글 '{post['title']}' 캡처 오류: {e}")
+
+    log(f"[{board_name}] 캡처 완료: {len(captured_data)}건")
     return captured_data
 
-def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, credentials=None):
+
+def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, credentials=None,
+            max_posts=None, text_range=None):
     """
     캡처 RPA를 실행합니다.
 
     - date_list: 대상 날짜(datetime 객체) 리스트. None이면 get_missing_dates() 사용.
     - target_boards: ["구매","판매","품목표"] 중 선택. None이면 전체.
+    - max_posts: 스크린샷 게시판(품목표) 캡처 건수 제한(검증용). None이면 무제한.
     - hooks (옵션): Job Manager 등에서 전달하는 콜백 모음.
       * hooks.get(\"on_step\"): 진행 상황 보고용 콜백
           on_step(phase: str, info: dict) 형태로 호출
@@ -409,11 +841,17 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
     log(f"대상 게시판: {[b['name'] for b in boards]}")
 
     with sync_playwright() as p:
-        # 1. 브라우저 초기화 (한 번만 열고 날짜별로 반복)
+        # 1. 브라우저 초기화 — persistent context로 로그인 세션 재사용(반복 로그인 방지)
+        # device_scale_factor=2: 캡처 해상도 2배 → 표 글자 선명 (OCR 정확도 향상)
         is_server = os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT")
-        browser = p.chromium.launch(headless=bool(is_server))
-        context = browser.new_context(viewport={'width': 1280, 'height': 1024})
-        page = context.new_page()
+        os.makedirs(SESSION_DIR, exist_ok=True)
+        context = p.chromium.launch_persistent_context(
+            SESSION_DIR,
+            headless=bool(is_server),
+            viewport={'width': 1280, 'height': 1024},
+            device_scale_factor=2,
+        )
+        page = context.pages[0] if context.pages else context.new_page()
 
         log("다음 카페 접속 중...")
         try:
@@ -546,40 +984,105 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
             log(f"로그인 도중 이슈 발생 (무시하고 계속 시도): {e}")
         # ✅✅✅ 로그인 블록 끝 ✅✅✅
 
-        # ✅ 3) 날짜별 순차 캡처 (시작일 ~ 오늘)
+        # ✅ 3) 캡처
+        #  - 스크린샷 게시판(품목표 등): 최신순 단일 패스로 [window_start ~ 오늘] 윈도우 수집
+        #  - 텍스트 게시판(구매/판매/회원정보/등업신청): 기존 날짜별 순차 방식 유지
         all_captured = []
-        total_dates = len(date_list)
+        window_start = min(d.date() for d in date_list)
+        screenshot_boards = [b for b in boards if b["name"] not in TEXT_BOARDS]
+        text_boards = [b for b in boards if b["name"] in TEXT_BOARDS]
 
+        # 3-1) 스크린샷 게시판: 윈도우 단일 패스
+        for b in screenshot_boards:
+            if check_pause_stop:
+                check_pause_stop()
+
+            log(f"\n===== [{b['name']}] 스크린샷 수집 시작 (기준일 {window_start} ~ 오늘) =====")
+            if on_step:
+                on_step("capture_board_start", {
+                    "board": b["name"],
+                    "window_start": window_start.strftime("%Y-%m-%d"),
+                })
+            ok = ensure_board(page, b["selector"], b["url"], timeout_sec=30)
+            if not ok:
+                log(f"[{b['name']}] 게시판 진입 실패. 다음 게시판으로 넘어갑니다.")
+                continue
+
+            captured = capture_recent_posts(
+                page, b["name"], vision_meat_root, window_start,
+                max_posts=max_posts, hooks=hooks,
+            )
+            all_captured.extend(captured)
+
+            if on_step:
+                on_step(
+                    phase="capture",
+                    info={
+                        "board": b["name"],
+                        "captured_count": len(captured),
+                        "total_captured": len(all_captured),
+                    },
+                )
+
+        # 3-2) 텍스트 게시판 — 범위(연도 등) 모드: 게시판 1회 순회로 [lo, hi] 전부 수집
+        if text_boards and text_range:
+            lo, hi = text_range
+            yr = lo.year
+            for b in text_boards:
+                if check_pause_stop:
+                    check_pause_stop()
+                log(f"\n===== [{b['name']}] {yr}년 범위 텍스트 수집 ({lo} ~ {hi}) =====")
+                ok = ensure_board(page, b["selector"], b["url"], timeout_sec=30)
+                if not ok:
+                    log(f"[{b['name']}] 게시판 진입 실패. 다음 게시판으로 넘어갑니다.")
+                    continue
+                board_frame = page.frame_locator("iframe#down")
+                base = os.path.join(vision_meat_root, f"{yr}_전체", b["name"])
+                text_data = extract_board_posts_text(
+                    board_frame, b["name"], os.path.join(base, "text_data"),
+                    start_date=lo, end_date=hi,
+                )
+                if text_data:
+                    excel_dir = os.path.join(base, "excel")
+                    os.makedirs(excel_dir, exist_ok=True)
+                    df = pd.DataFrame(text_data)
+                    fn = f"{yr}_{b['name']}_데이터.xlsx"
+                    df.to_excel(os.path.join(excel_dir, fn), index=False)
+                    db_dir = os.path.join(vision_meat_root, "database")
+                    os.makedirs(db_dir, exist_ok=True)
+                    df.to_excel(os.path.join(db_dir, fn), index=False)
+                    log(f"[{b['name']}] Excel 저장 완료: {fn} ({len(text_data)}건)")
+                all_captured.extend(
+                    [{"board": b["name"], "title": d["제목"], "date": d["작성일"]} for d in text_data]
+                )
+
+        # 3-2b) 텍스트 게시판: 날짜별 순차 방식 (범위 미지정 시)
+        total_dates = len(date_list)
         for date_idx, target_date in enumerate(date_list, 1):
+            if not text_boards or text_range:
+                break
             if check_pause_stop:
                 check_pause_stop()
 
             date_str = target_date.strftime("%Y-%m-%d")
             log(f"\n{'='*60}")
-            log(f"▶ [{date_str}] 날짜 수집 시작 ({date_idx}/{total_dates})")
+            log(f"▶ [{date_str}] 텍스트 게시판 수집 ({date_idx}/{total_dates})")
             log(f"{'='*60}")
-
-            if on_step:
-                on_step("capture_date_start", {
-                    "date": date_str,
-                    "index": date_idx,
-                    "total": total_dates,
-                })
 
             daily_dir = os.path.join(vision_meat_root, date_str)
             os.makedirs(daily_dir, exist_ok=True)
 
-            for board_idx, b in enumerate(boards, 1):
+            for board_idx, b in enumerate(text_boards, 1):
                 if check_pause_stop:
                     check_pause_stop()
 
-                log(f"\n===== [{date_str}] [{b['name']}] 게시판 수집 시작 ({board_idx}/{len(boards)}) =====")
+                log(f"\n===== [{date_str}] [{b['name']}] 게시판 수집 시작 ({board_idx}/{len(text_boards)}) =====")
                 if on_step:
                     on_step("capture_board_start", {
                         "date": date_str,
                         "board": b["name"],
                         "board_index": board_idx,
-                        "total_boards": len(boards),
+                        "total_boards": len(text_boards),
                         "date_index": date_idx,
                         "total_dates": total_dates,
                     })
@@ -589,9 +1092,22 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
                     continue
 
                 board_frame = page.frame_locator("iframe#down")
-                capture_dir = os.path.join(daily_dir, b["name"], "screenshots")
-                captured = capture_board_posts(board_frame, b["name"], capture_dir, target_date=target_date)
-                all_captured.extend(captured)
+                text_dir = os.path.join(daily_dir, b["name"], "text_data")
+                text_data = extract_board_posts_text(board_frame, b["name"], text_dir, target_date=target_date)
+
+                if text_data:
+                    excel_dir = os.path.join(daily_dir, b["name"], "excel")
+                    os.makedirs(excel_dir, exist_ok=True)
+                    df = pd.DataFrame(text_data)
+                    output_filename = f"{date_str.replace('-', '')}_{b['name']}_데이터.xlsx"
+                    df.to_excel(os.path.join(excel_dir, output_filename), index=False)
+                    db_dir = os.path.join(vision_meat_root, "database")
+                    os.makedirs(db_dir, exist_ok=True)
+                    df.to_excel(os.path.join(db_dir, output_filename), index=False)
+                    log(f"[{b['name']}] Excel 저장 완료: {output_filename} ({len(text_data)}건)")
+
+                captured_count = len(text_data)
+                all_captured.extend([{"board": b["name"], "title": d["제목"], "date": d["작성일"]} for d in text_data])
 
                 if on_step:
                     on_step(
@@ -599,20 +1115,21 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
                         info={
                             "date": date_str,
                             "board": b["name"],
-                            "captured_count": len(captured),
+                            "captured_count": captured_count,
                             "total_captured": len(all_captured),
                         },
                     )
 
-            log(f"[{date_str}] 수집 완료. 누적 캡처 수: {len(all_captured)}개")
+            log(f"[{date_str}] 텍스트 수집 완료. 누적: {len(all_captured)}개")
 
-        browser.close()
+        context.close()
 
     if not all_captured:
         log("새롭게 수집된 데이터가 없습니다.")
     else:
-        log(f"총 {len(all_captured)}개의 게시글 캡처 완료.")
-        log("2단계: batch_processor.py를 실행하여 AI 분석을 진행하세요.")
+        log(f"총 {len(all_captured)}개의 게시글 수집 완료.")
+        log("텍스트 게시판(구매/판매/회원정보/등업신청)은 Excel 저장 완료.")
+        log("품목표는 batch_processor.py로 AI 분석을 진행하세요.")
 
 if __name__ == "__main__":
     run_rpa()

@@ -5,3 +5,11 @@ __pycache__/
 .claude/
 .vscode/
 visionmeat/
+browser_session/
+tmp_*.json
+date_check_result.txt
+diag_*.py
+
+# 로컬 서버/터널 로그
+*.log
+ab_ocr_out/
