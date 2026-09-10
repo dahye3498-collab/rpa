@@ -81,7 +81,21 @@ python3 -c "import datetime; print(datetime.date.today().weekday(), datetime.dat
 
 - 위 검색어 중 2~3개를 WebSearch 툴로 실행
 - 반드시 **실제 수치**(가격/수출량/생산량 등) 포함된 결과 사용
-- 신뢰 출처 우선: **USDA, MLA, FAO, Rabobank, Reuters, Bloomberg, S&P Global**
+- 신뢰 출처 우선 (1순위 = 기관 원자료, 2순위 = 산업지/통신사):
+
+| 구분 | 출처 | 강점 | 주로 쓰는 요일 |
+|---|---|---|---|
+| 기관 | **USDA** (ERS / WASDE / AMS) | 미국 생산·가격·재고 원자료 | 월·화·수·금 |
+| 기관 | **MLA** | 호주 소·양 가격 지표(EYCI 등) | 월·금 |
+| 기관 | **FAO** | 육류가격지수, 세계 수급 전망 | 금 |
+| 기관 | **USMEF** | 미국 소·돼지고기 수출 물량/금액 월별 통계 | 목·금 |
+| 산업지 | **Beef Central** | 호주 경매장 실거래가, 산지 동향 | 월·목 |
+| 리서치 | **Rabobank**, **S&P Global** | 분기 전망, 글로벌 증감률 | 전 요일 |
+| 통신사 | **Reuters**, **Bloomberg** | 속보성 무역·관세 이슈 | 목 |
+
+- USMEF 검색 시 `usmef.org` 도메인 한정이 정확도가 높음 (예: "USMEF beef pork export statistics 2026")
+- Beef Central은 경매장별 일별 리포트가 올라오므로 호주 시세 인용에 적합 (`beefcentral.com` 한정 검색)
+- Reuters / Bloomberg는 유료벽으로 본문 조회가 막히는 경우가 있음 — 검색 스니펫에 수치가 없으면 기관 원자료로 대체
 - AI 생성 수치 사용 금지 — 검색으로 확인된 데이터만 사용
 
 ---
@@ -339,7 +353,7 @@ NEWSLETTER_ROUTINE.md의 STEP 1~6을 순서대로 실행 (금요일이면 카드
 - 데이터 수집이 안 되는 경우에도 Notion 등록은 진행 (Summary에 사유 명시)
 - kr_summary는 1000자 이하
 - SMS 내용은 90자 이하 (초과 시 말줄임 처리)
-- 출처는 반드시 Summary에 명시 (USDA / MLA / FAO / Rabobank / Reuters 등)
+- 출처는 반드시 Summary에 명시 (USDA / MLA / FAO / USMEF / Beef Central / Rabobank / Reuters 등)
 
 ---
 
