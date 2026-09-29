@@ -18,6 +18,9 @@ import rpa_automation
 import batch_processor
 
 
+TEXT_BOARDS = {"구매", "판매", "회원정보", "등업신청"}
+
+
 class StopSignal(RuntimeError):
     pass
 
@@ -209,7 +212,9 @@ class JobManager:
             idx   = info.get("index", 0)
             total = max(info.get("total", 1), 1)
             pct   = round((idx - 1) / total * 100, 1)
-            msg   = f"[캡처] 날짜 {idx}/{total} – {info.get('date')} 수집 시작"
+            board = info.get("board", "")
+            tag = "[텍스트]" if board in TEXT_BOARDS else "[캡처]"
+            msg   = f"{tag} 날짜 {idx}/{total} – {info.get('date')} 수집 시작"
             kwargs = dict(
                 phase="capturing",
                 current_date=info.get("date"),
@@ -226,13 +231,15 @@ class JobManager:
             bi = info.get("board_index", 0)
             tb = max(info.get("total_boards", 1), 1)
             pct = round(((di - 1) + (bi - 1) / tb) / td * 100, 1)
+            board = info.get("board", "")
+            tag = "[텍스트]" if board in TEXT_BOARDS else "[캡처]"
             msg = (
-                f"[캡처] 날짜 {di}/{td} | {info.get('board')} 게시판 {bi}/{tb} 수집 중"
+                f"{tag} 날짜 {di}/{td} | {board} 게시판 {bi}/{tb} 수집 중"
             )
             kwargs = dict(
                 phase="capturing",
                 current_date=info.get("date"),
-                current_board=info.get("board"),
+                current_board=board,
                 current_date_index=di,
                 total_dates=td,
                 current_index=bi,
@@ -243,14 +250,16 @@ class JobManager:
 
         elif phase == "capture":
             total_cap = info.get("total_captured", 0)
+            board = info.get("board", "")
+            tag = "[텍스트]" if board in TEXT_BOARDS else "[캡처]"
             msg = (
-                f"[캡처] {info.get('date')} / {info.get('board')}"
+                f"{tag} {info.get('date')} / {board}"
                 f" – 누적 {total_cap}개 완료"
             )
             kwargs = dict(
                 phase="capturing",
                 current_date=info.get("date"),
-                current_board=info.get("board"),
+                current_board=board,
                 current_index=info.get("captured_count", 0),
                 total_in_scope=max(total_cap, 1),
                 message=msg,
@@ -427,24 +436,47 @@ class JobManager:
             except ValueError:
                 continue
 
+            TEXT_BOARDS = {"구매", "판매", "회원정보", "등업신청"}
             date_info: Dict[str, Any] = {}
             for board in boards:
-                s_dir = os.path.join(entry_path, board, "screenshots")
                 e_dir = os.path.join(entry_path, board, "excel")
                 expected_excel = os.path.join(
                     e_dir, f"{entry.replace('-', '')}_{board}_데이터.xlsx"
                 )
-                dir_exists = os.path.isdir(s_dir)
-                has_screenshots = dir_exists and any(
-                    f.lower().endswith((".png", ".jpg", ".jpeg"))
-                    for f in os.listdir(s_dir)
-                ) if dir_exists else False
-                has_ocr = os.path.exists(expected_excel)
-                date_info[board] = {
-                    "rpa_done": has_screenshots,
-                    "ocr_done": has_ocr,
-                    "no_posts": dir_exists and not has_screenshots,
-                }
+                has_excel = os.path.exists(expected_excel)
+
+                if board in TEXT_BOARDS:
+                    # 텍스트 게시판: text_data, excel, 또는 기존 스크린샷 존재 여부로 판단
+                    t_dir = os.path.join(entry_path, board, "text_data")
+                    text_file = os.path.join(t_dir, "text_data.json")
+                    has_text_data = os.path.exists(text_file)
+                    # 기존 스크린샷 방식 데이터도 호환 (이전에 수집된 데이터)
+                    s_dir = os.path.join(entry_path, board, "screenshots")
+                    s_dir_exists = os.path.isdir(s_dir)
+                    has_screenshots = s_dir_exists and any(
+                        f.lower().endswith((".png", ".jpg", ".jpeg"))
+                        for f in os.listdir(s_dir)
+                    ) if s_dir_exists else False
+                    t_dir_exists = os.path.isdir(t_dir)
+                    has_data = has_text_data or has_excel or has_screenshots
+                    date_info[board] = {
+                        "rpa_done": has_data,
+                        "ocr_done": has_excel,
+                        "no_posts": (t_dir_exists or s_dir_exists) and not has_data,
+                    }
+                else:
+                    # 스크린샷 게시판 (품목표): 기존 로직
+                    s_dir = os.path.join(entry_path, board, "screenshots")
+                    dir_exists = os.path.isdir(s_dir)
+                    has_screenshots = dir_exists and any(
+                        f.lower().endswith((".png", ".jpg", ".jpeg"))
+                        for f in os.listdir(s_dir)
+                    ) if dir_exists else False
+                    date_info[board] = {
+                        "rpa_done": has_screenshots,
+                        "ocr_done": has_excel,
+                        "no_posts": dir_exists and not has_screenshots,
+                    }
             result[entry] = date_info
 
         return result

@@ -10,11 +10,16 @@ VisionMeat RPA/OCR 제어 패널
 접속: http://localhost:5000  (같은 LAN의 다른 PC: http://서버IP:5000)
 """
 
+import os
+import re
 import json
-from flask import Flask, render_template, Response, request, jsonify
+from flask import Flask, render_template, Response, request, jsonify, send_from_directory, abort
 from flask_cors import CORS
 
 from job_manager import job_manager
+import product_search
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 app = Flask(__name__)
 CORS(app)
@@ -25,6 +30,65 @@ CORS(app)
 @app.route("/")
 def index():
     return render_template("index.html")
+
+
+@app.route("/search")
+def search_page():
+    return render_template("search.html")
+
+
+# ── 품목 검색 API ────────────────────────────────────────────
+
+@app.route("/api/search")
+def api_search():
+    q = request.args.get("q", "").strip()
+    warehouse = request.args.get("warehouse", "").strip()
+    origin = request.args.get("origin", "").strip()
+    brand = request.args.get("brand", "").strip()
+    field = request.args.get("field", "전체").strip() or "전체"
+    try:
+        recent = int(request.args.get("recent", "3"))
+    except ValueError:
+        recent = 3
+    exact = request.args.get("exact", "").strip() in ("1", "true", "yes", "on")
+    res = product_search.search(q, warehouse, origin, brand, field, limit=1000, recent=recent, exact=exact)
+    # 판매가는 비공개 → 응답에서 제외 (캐시 원본은 보존하기 위해 복사본 생성)
+    HIDE = {"판매가_원"}
+    results = [{k: v for k, v in r.items() if k not in HIDE} for r in res["results"]]
+    return jsonify({
+        "count": res["count"],
+        "shown": len(results),
+        "results": results,
+        "dates": res.get("dates"),
+    })
+
+
+@app.route("/api/search_stats")
+def api_search_stats():
+    return jsonify(product_search.stats())
+
+
+@app.route("/api/build_contacts", methods=["POST", "GET"])
+def api_build_contacts():
+    """업체 연락처 인덱스 재빌드 (신규 업체만 상단 OCR)."""
+    try:
+        import contacts
+        force = request.args.get("force", "").strip() in ("1", "true", "yes")
+        idx = contacts.build_contacts(force=force)
+        return jsonify({"ok": True, "vendors": len(idx)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/screenshot/<date>/<path:filename>")
+def screenshot(date, filename):
+    """원본 품목표 스크린샷 서빙 (검색 결과 → 원본 대조용)."""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        abort(404)
+    d = os.path.join(BASE_DIR, "visionmeat", date, "품목표", "screenshots")
+    if not os.path.isdir(d):
+        abort(404)
+    return send_from_directory(d, filename)
 
 
 # ── SSE 스트림 ───────────────────────────────────────────────

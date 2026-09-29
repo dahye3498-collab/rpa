@@ -36,6 +36,15 @@ SOURCE_MAPPING_FILE = os.path.join(BASE_DIR, "[운영] 자동변환_소스데이
 RESIZE_IMAGES = os.getenv("RESIZE_IMAGES", "0").strip() == "1"
 MAX_IMG_SIZE = int(os.getenv("MAX_IMG_SIZE", "1280"))
 
+# 품목표 세로로 긴 이미지 자동 타일 분할 OCR 설정
+# (한 장 통째 OCR 시 API가 이미지를 축소해 환각·행 누락이 생기는 문제 방지)
+OCR_TILE_THRESHOLD = int(os.getenv("OCR_TILE_THRESHOLD", "1400"))  # 이 높이(px) 초과 시 분할
+OCR_TILE_HEIGHT = int(os.getenv("OCR_TILE_HEIGHT", "1500"))        # 밴드 1개 높이
+OCR_TILE_OVERLAP = int(os.getenv("OCR_TILE_OVERLAP", "300"))       # 밴드 간 겹침(행 잘림 방지)
+
+# 텍스트만 추출하는 게시판 (RPA 단계에서 이미 Excel 저장 완료, OCR 불필요)
+TEXT_BOARDS = {"구매", "판매", "회원정보", "등업신청"}
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
@@ -250,12 +259,21 @@ def _build_prompt(board_type: str) -> tuple[str, str]:
 }
 
 추출 규칙:
-1. 축종·원산지·브랜드 등 병합 셀 값은 해당 그룹 모든 행에 반복 적용하세요.
-2. 품목명은 '품목'에, 브랜드명은 '브랜드'에 각각 분리하세요.
-3. 포장 방식(VP, IWP 등)은 '비고'에 넣으세요.
-4. 숫자 필드(재고, 판매가, 평중)는 단위 없이 숫자만 넣으세요.
-5. 값을 확인할 수 없으면 빈 문자열("")로 두세요.
+1. 축종·원산지·브랜드·창고 등 병합 셀 값은 해당 그룹의 모든 행에 반드시 반복 적용하세요.
+   특히 창고(보관위치)가 여러 행에 걸쳐 병합된 경우 빈칸으로 두지 말고 각 행에 같은 값을 채우세요.
+2. 표의 모든 행을 하나도 빠짐없이 추출하세요. 요약·생략·중복 제거를 하지 마세요.
+   먼저 표의 품목 행 수를 센 뒤, products 배열의 길이가 그 수와 일치하도록 하세요.
+3. 셀에 보이는 값을 그대로(verbatim) 추출하세요. 품목명은 '품목'에, 브랜드명은 '브랜드'에 분리하세요.
+4. 창고 컬럼과 등급·EST(넘버) 컬럼을 혼동하지 마세요. 숫자/영문코드(예: 86M, 208A)는 창고가 아니라 EST입니다.
+5. 포장 방식(VP, IWP 등)은 '비고'에 넣으세요.
+6. 숫자 필드(재고, 판매가, 평중)는 단위 없이 숫자만 넣으세요.
+7. 값을 확인할 수 없으면 빈 문자열("")로 두세요. (단, 병합된 창고·원산지·브랜드는 규칙1에 따라 채웁니다.)
 """
+        try:
+            import warehouses
+            prompt += "\n\n" + warehouses.prompt_block()
+        except Exception:
+            pass
         return prompt, "products"
 
     # ── 2. 등업신청 ──────────────────────────────────────────────────────────
@@ -331,75 +349,83 @@ def _build_prompt(board_type: str) -> tuple[str, str]:
     elif board_type == "구매":
         prompt = """
 이 이미지는 축산물 커뮤니티의 '구매(구합니다)' 게시글 캡처본입니다.
-이미지에서 보이는 모든 정보를 아래 JSON 형식으로 정확하게 추출하세요.
+게시글에 여러 품목이 있으면 품목마다 별도 객체로 분리하여 배열로 반환하세요.
+각 필드에는 반드시 하나의 값만 넣으세요. 절대 콤마로 여러 값을 합치지 마세요.
 
 {
-  "구매_info": {
-    "제목": "게시글 제목",
-    "작성자": "작성자 닉네임 또는 성명",
-    "작성일": "작성 날짜 (YYYY-MM-DD 형식으로 변환, 불가시 원문)",
-    "축종": "소/돼지/닭/양 등",
-    "원산지": "호주/미국/국내 등 (복수면 콤마 구분)",
-    "브랜드": "희망 브랜드명 (복수면 콤마 구분, 무관이면 빈 문자열)",
-    "품목": "희망 부위 또는 품목명 (복수면 콤마 구분)",
-    "등급": "희망 등급 (없으면 빈 문자열)",
-    "수량_box": "희망 수량 숫자 (단위 제외, 없으면 빈 문자열)",
-    "희망단가": "희망 가격 (없으면 빈 문자열)",
-    "희망납기일": "납기 희망일 (없으면 빈 문자열)",
-    "보관": "냉동/냉장 (없으면 빈 문자열)",
-    "업체명": "구매자 회사명",
-    "담당자": "담당자 이름",
-    "연락처": "연락처 (전화 또는 핸드폰)",
-    "비고": "기타 요청사항, 스펙, 특이조건 등"
-  }
+  "구매_items": [
+    {
+      "제목": "게시글 제목",
+      "작성자": "작성자 닉네임 또는 성명",
+      "작성일": "YYYY-MM-DD (불가시 원문)",
+      "축종": "소/돼지/닭/양 중 하나만",
+      "원산지": "호주/미국/국내 등 하나만",
+      "브랜드": "브랜드명 하나만 (무관이면 빈 문자열)",
+      "품목": "부위 또는 품목명 하나만",
+      "등급": "등급 하나만 (없으면 빈 문자열)",
+      "수량_box": "숫자만 (단위 제외, 없으면 빈 문자열)",
+      "희망단가": "숫자만 (없으면 빈 문자열)",
+      "희망납기일": "날짜 (없으면 빈 문자열)",
+      "보관": "냉동 또는 냉장 (없으면 빈 문자열)",
+      "업체명": "구매자 회사명",
+      "담당자": "담당자 이름",
+      "연락처": "전화 또는 핸드폰",
+      "비고": "기타 요청사항, 스펙, 특이조건"
+    }
+  ]
 }
 
-추출 규칙:
-1. 브랜드·품목·원산지가 여럿이면 콤마(,)로 구분하세요.
-2. 수량·단가는 숫자만 추출하세요 (단위 표기 제외).
-3. 작성일은 가능한 한 YYYY-MM-DD 형식으로 변환하세요.
-4. 값이 없는 필드는 빈 문자열("")로 두세요.
+추출 규칙 (매우 중요):
+1. 품목이 여러 개면 품목마다 별도 행으로 분리하세요 (예: 삼겹살 1행, 목심 1행).
+2. 각 행의 모든 필드에는 값이 하나만 들어가야 합니다. 콤마(,)로 여러 값을 합치지 마세요.
+3. 공통 정보(작성자, 업체명, 연락처 등)는 모든 행에 동일하게 반복하세요.
+4. 수량·단가는 단위 없이 숫자만 넣으세요.
+5. 값이 없는 필드는 빈 문자열("")로 두세요.
 """
-        return prompt, "구매_info"
+        return prompt, "구매_items"
 
     # ── 5. 판매 ──────────────────────────────────────────────────────────────
     elif board_type == "판매":
         prompt = """
 이 이미지는 축산물 커뮤니티의 '판매(팝니다)' 게시글 캡처본입니다.
-이미지에서 보이는 모든 정보를 아래 JSON 형식으로 정확하게 추출하세요.
+게시글에 여러 품목이 있으면 품목마다 별도 객체로 분리하여 배열로 반환하세요.
+각 필드에는 반드시 하나의 값만 넣으세요. 절대 콤마로 여러 값을 합치지 마세요.
 
 {
-  "판매_info": {
-    "제목": "게시글 제목",
-    "작성자": "작성자 닉네임 또는 성명",
-    "작성일": "작성 날짜 (YYYY-MM-DD 형식으로 변환, 불가시 원문)",
-    "축종": "소/돼지/닭/양 등",
-    "원산지": "호주/미국/국내 등",
-    "브랜드": "브랜드명",
-    "품목": "부위 또는 품목명",
-    "등급": "등급 정보 (없으면 빈 문자열)",
-    "EST": "EST 번호 (없으면 빈 문자열)",
-    "수량_box": "판매 수량 숫자 (단위 제외)",
-    "판매단가": "판매 단가 (없으면 빈 문자열)",
-    "평중_kg": "평균 중량 숫자 (없으면 빈 문자열)",
-    "소비기한": "소비기한 날짜 또는 원문",
-    "보관": "냉동/냉장",
-    "창고": "보관 창고명",
-    "업체명": "판매자 회사명",
-    "담당자": "담당자 이름",
-    "연락처": "연락처",
-    "비고": "포장 방식(VP/IWP 등), 기타 특이사항"
-  }
+  "판매_items": [
+    {
+      "제목": "게시글 제목",
+      "작성자": "작성자 닉네임 또는 성명",
+      "작성일": "YYYY-MM-DD (불가시 원문)",
+      "축종": "소/돼지/닭/양 중 하나만",
+      "원산지": "호주/미국/국내 등 하나만",
+      "브랜드": "브랜드명 하나만",
+      "품목": "부위 또는 품목명 하나만",
+      "등급": "등급 하나만 (없으면 빈 문자열)",
+      "EST": "EST 번호 (없으면 빈 문자열)",
+      "수량_box": "숫자만 (단위 제외)",
+      "판매단가": "숫자만 (없으면 빈 문자열)",
+      "평중_kg": "숫자만 (없으면 빈 문자열)",
+      "소비기한": "날짜 또는 원문",
+      "보관": "냉동 또는 냉장",
+      "창고": "보관 창고명",
+      "업체명": "판매자 회사명",
+      "담당자": "담당자 이름",
+      "연락처": "연락처",
+      "비고": "포장 방식(VP/IWP 등), 기타 특이사항"
+    }
+  ]
 }
 
-추출 규칙:
-1. 브랜드·품목·원산지가 여럿이면 콤마(,)로 구분하세요.
-2. 수량·단가·평중은 숫자만 추출하세요 (단위 표기 제외).
-3. 작성일은 가능한 한 YYYY-MM-DD 형식으로 변환하세요.
-4. 포장 방식(VP, IWP 등)은 '비고'에 넣으세요.
-5. 값이 없는 필드는 빈 문자열("")로 두세요.
+추출 규칙 (매우 중요):
+1. 품목이 여러 개면 품목마다 별도 행으로 분리하세요 (예: 삼겹살 1행, 목심 1행).
+2. 각 행의 모든 필드에는 값이 하나만 들어가야 합니다. 콤마(,)로 여러 값을 합치지 마세요.
+3. 공통 정보(작성자, 업체명, 연락처 등)는 모든 행에 동일하게 반복하세요.
+4. 수량·단가·평중은 단위 없이 숫자만 넣으세요.
+5. 포장 방식(VP, IWP 등)은 '비고'에 넣으세요.
+6. 값이 없는 필드는 빈 문자열("")로 두세요.
 """
-        return prompt, "판매_info"
+        return prompt, "판매_items"
 
     # ── 기타 (fallback) ───────────────────────────────────────────────────────
     else:
@@ -663,29 +689,22 @@ class DataReviewGUI:
 # ─────────────────────────────────────────────
 # Core extractor
 # ─────────────────────────────────────────────
-def extract_data_from_image(image_path: str, board_type: str = "구매") -> dict | list:
-    """이미지에서 board_type에 맞는 구조화된 데이터 추출"""
-    log(f"AI 분석 중 [{board_type}]: {os.path.basename(image_path)}...")
-    base64_image = encode_image(image_path)
-    mime = get_mime_by_ext(image_path)
-
+def _ocr_from_b64(base64_image: str, mime: str, board_type: str):
+    """base64 이미지 1장을 board_type 스키마로 구조화 추출."""
     prompt, response_key = _build_prompt(board_type)
-
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64_image}"}},
+                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{base64_image}", "detail": "high"}},
             ],
         }
     ]
-
     try:
         response = call_gpt_with_retry(messages, max_retry=3)
         if not response:
             return {}
-
         content = response.choices[0].message.content
         data = json.loads(content)
         return data.get(response_key, {})
@@ -695,6 +714,316 @@ def extract_data_from_image(image_path: str, board_type: str = "구매") -> dict
     except Exception as e:
         log(f"AI analysis error: {e}")
         return {}
+
+
+def _row_key(r: dict) -> tuple:
+    """행 동일성 판단용 키 (타일 경계 중복 제거)."""
+    return tuple(str(r.get(k, "")).strip() for k in ("품목", "등급", "EST", "브랜드", "창고", "평중_kg"))
+
+
+def _merge_product_tiles(tile_lists: list) -> list:
+    """
+    타일별 추출 결과를 순서대로 병합하되, 겹침(overlap) 구간에서 생긴
+    경계 중복만 제거한다. (표 내부의 정상적인 반복 행은 보존)
+    """
+    merged = []
+    for rows in tile_lists:
+        if not isinstance(rows, list) or not rows:
+            continue
+        if not merged:
+            merged.extend(rows)
+            continue
+        tail_keys = [_row_key(r) for r in merged[-12:]]
+        skip = 0
+        for r in rows:
+            if _row_key(r) in tail_keys:
+                skip += 1
+            else:
+                break
+        merged.extend(rows[skip:])
+    return merged
+
+
+def _extract_products_tiled(image_path: str) -> list:
+    """
+    세로로 긴 품목표 이미지를 겹침 밴드로 분할해 각각 OCR 후 병합.
+    (한 장 통째 OCR 시 API가 이미지를 축소해 발생하는 환각·행 누락 방지)
+    """
+    try:
+        im = Image.open(image_path)
+    except Exception:
+        return _ocr_from_b64(encode_image(image_path), get_mime_by_ext(image_path), "품목표")
+
+    w, h = im.size
+    band, ov = OCR_TILE_HEIGHT, OCR_TILE_OVERLAP
+    bounds = []
+    y = 0
+    while y < h:
+        y2 = min(h, y + band)
+        bounds.append((y, y2))
+        if y2 >= h:
+            break
+        y += max(1, band - ov)
+
+    log(f"AI 분석(타일 {len(bounds)}개) [품목표]: {os.path.basename(image_path)} (높이 {h}px)...")
+    tile_results = []
+    for (y1, y2) in bounds:
+        crop = im.crop((0, y1, w, y2))
+        buf = BytesIO()
+        crop.save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+        rows = _ocr_from_b64(b64, "image/png", "품목표")
+        tile_results.append(rows if isinstance(rows, list) else [])
+
+    return _merge_product_tiles(tile_results)
+
+
+def extract_data_from_image(image_path: str, board_type: str = "구매") -> dict | list:
+    """
+    이미지에서 board_type에 맞는 구조화 데이터 추출.
+    품목표(행 리스트)이고 이미지가 길면 자동으로 타일 분할 OCR을 수행한다.
+    """
+    log(f"AI 분석 중 [{board_type}]: {os.path.basename(image_path)}...")
+
+    if board_type == "품목표" and PIL_AVAILABLE:
+        try:
+            with Image.open(image_path) as _im:
+                _tall = _im.height > OCR_TILE_THRESHOLD
+        except Exception:
+            _tall = False
+        if _tall:
+            return _extract_products_tiled(image_path)
+
+    return _ocr_from_b64(encode_image(image_path), get_mime_by_ext(image_path), board_type)
+
+
+def _build_text_prompt(board_type: str) -> tuple[str, str]:
+    """
+    텍스트 기반 게시판용 프롬프트를 반환합니다.
+    (prompt_text, response_key)
+    """
+
+    if board_type == "구매":
+        prompt = """
+아래는 축산물 커뮤니티의 '구매(구합니다)' 게시글 텍스트입니다.
+게시글에 여러 품목이 있으면 품목마다 별도 객체로 분리하여 배열로 반환하세요.
+각 필드에는 반드시 하나의 값만 넣으세요. 절대 콤마로 여러 값을 합치지 마세요.
+
+{
+  "구매_items": [
+    {
+      "축종": "소/돼지/닭/양 중 하나만",
+      "원산지": "호주/미국/국내 등 하나만",
+      "브랜드": "브랜드명 하나만 (무관이면 빈 문자열)",
+      "품목": "부위 또는 품목명 하나만",
+      "등급": "등급 하나만 (없으면 빈 문자열)",
+      "수량_box": "숫자만 (단위 제외, 없으면 빈 문자열)",
+      "희망단가": "숫자만 (없으면 빈 문자열)",
+      "희망납기일": "날짜 (없으면 빈 문자열)",
+      "보관": "냉동 또는 냉장 (없으면 빈 문자열)",
+      "업체명": "구매자 회사명",
+      "담당자": "담당자 이름",
+      "연락처": "전화 또는 핸드폰",
+      "비고": "기타 요청사항, 스펙, 특이조건"
+    }
+  ]
+}
+
+추출 규칙 (매우 중요):
+1. 품목이 여러 개면 품목마다 별도 행으로 분리하세요 (예: 삼겹살 1행, 목심 1행).
+2. 각 행의 모든 필드에는 값이 하나만 들어가야 합니다. 콤마(,)로 여러 값을 합치지 마세요.
+3. 공통 정보(업체명, 연락처, 담당자 등)는 모든 행에 동일하게 반복하세요.
+4. 수량·단가는 단위 없이 숫자만 넣으세요.
+5. 값이 없는 필드는 빈 문자열("")로 두세요.
+"""
+        return prompt, "구매_items"
+
+    elif board_type == "판매":
+        prompt = """
+아래는 축산물 커뮤니티의 '판매(팝니다)' 게시글 텍스트입니다.
+게시글에 여러 품목이 있으면 품목마다 별도 객체로 분리하여 배열로 반환하세요.
+각 필드에는 반드시 하나의 값만 넣으세요. 절대 콤마로 여러 값을 합치지 마세요.
+
+{
+  "판매_items": [
+    {
+      "축종": "소/돼지/닭/양 중 하나만",
+      "원산지": "호주/미국/국내 등 하나만",
+      "브랜드": "브랜드명 하나만",
+      "품목": "부위 또는 품목명 하나만",
+      "등급": "등급 하나만 (없으면 빈 문자열)",
+      "EST": "EST 번호 (없으면 빈 문자열)",
+      "수량_box": "숫자만 (단위 제외)",
+      "판매단가": "숫자만 (없으면 빈 문자열)",
+      "평중_kg": "숫자만 (없으면 빈 문자열)",
+      "소비기한": "날짜 또는 원문",
+      "보관": "냉동 또는 냉장",
+      "창고": "보관 창고명",
+      "업체명": "판매자 회사명",
+      "담당자": "담당자 이름",
+      "연락처": "연락처",
+      "비고": "포장 방식(VP/IWP 등), 기타 특이사항"
+    }
+  ]
+}
+
+추출 규칙 (매우 중요):
+1. 품목이 여러 개면 품목마다 별도 행으로 분리하세요 (예: 삼겹살 1행, 목심 1행).
+2. 각 행의 모든 필드에는 값이 하나만 들어가야 합니다. 콤마(,)로 여러 값을 합치지 마세요.
+3. 공통 정보(업체명, 연락처, 담당자 등)는 모든 행에 동일하게 반복하세요.
+4. 수량·단가·평중은 단위 없이 숫자만 넣으세요.
+5. 포장 방식(VP, IWP 등)은 '비고'에 넣으세요.
+6. 값이 없는 필드는 빈 문자열("")로 두세요.
+"""
+        return prompt, "판매_items"
+
+    elif board_type == "회원정보":
+        prompt = """
+아래는 축산물 커뮤니티 '회원정보' 게시글 텍스트입니다.
+텍스트에서 다음 정보를 추출하여 JSON 형식으로 반환하세요.
+
+{
+  "회원정보_info": {
+    "닉네임": "커뮤니티 닉네임",
+    "성명": "실명",
+    "회사명": "회사 또는 사업체명",
+    "직책": "직함",
+    "회사전화번호": "대표 전화번호",
+    "회사팩스번호": "팩스 번호",
+    "핸드폰번호": "휴대폰 번호",
+    "설립년월": "회사 설립 연월",
+    "직원수": "직원 수 숫자",
+    "주력브랜드_품목": "취급 브랜드 및 품목 전체 목록 (원문 그대로)",
+    "주사용창고": "주로 사용하는 냉동/냉장 창고명",
+    "배송가능지역": "배송 가능 지역",
+    "회사주소": "사업장 주소",
+    "회사소개": "회사 소개 문구 전체",
+    "가입일": "커뮤니티 가입일 (있는 경우)",
+    "등급": "현재 회원 등급 (있는 경우)"
+  }
+}
+
+추출 규칙:
+1. 각 필드는 반드시 분리 추출하세요. 절대 한 필드에 합치지 마세요.
+2. '주력브랜드_품목'은 원산지별·축종별 브랜드·품목 목록 전체를 줄바꿈 포함 그대로 유지하세요.
+3. 값이 없는 필드는 빈 문자열("")로 두세요.
+"""
+        return prompt, "회원정보_info"
+
+    elif board_type == "등업신청":
+        prompt = """
+아래는 축산물 커뮤니티의 '등업신청' 게시글 텍스트입니다.
+텍스트에서 다음 정보를 추출하여 JSON 형식으로 반환하세요.
+
+{
+  "등업신청_info": {
+    "등업구분": "정회원/우수회원 등 신청 등급",
+    "닉네임": "커뮤니티 닉네임",
+    "성명": "실명",
+    "회사명": "회사 또는 사업체명",
+    "직책": "직함 (예: 대표, 부장, 대리 등)",
+    "회사전화번호": "대표 전화번호",
+    "회사팩스번호": "팩스 번호",
+    "핸드폰번호": "휴대폰 번호",
+    "설립년월": "회사 설립 연월 (예: 2015-09)",
+    "직원수": "직원 수 숫자",
+    "주력브랜드_품목": "취급 브랜드 및 품목 전체 목록 (원문 그대로)",
+    "주사용창고": "주로 사용하는 냉동/냉장 창고명",
+    "배송가능지역": "배송 가능 지역",
+    "회사주소": "사업장 주소",
+    "회사소개": "회사 소개 문구 전체"
+  }
+}
+
+추출 규칙:
+1. 각 필드는 반드시 분리 추출하세요. 절대 한 필드에 합치지 마세요.
+2. '주력브랜드_품목'은 원산지별·축종별 브랜드·품목 목록 전체를 줄바꿈 포함 그대로 유지하세요.
+3. 값이 없는 필드는 빈 문자열("")로 두세요.
+"""
+        return prompt, "등업신청_info"
+
+    else:
+        prompt = f"""
+아래는 축산물 커뮤니티의 '{board_type}' 게시글 텍스트입니다.
+텍스트에서 모든 정보를 아래 JSON 형식으로 추출하세요.
+
+{{
+  "{board_type}_info": {{
+    "축종": "...",
+    "원산지": "...",
+    "브랜드": "...",
+    "품목": "...",
+    "등급": "...",
+    "수량_box": "...",
+    "업체명": "...",
+    "담당자": "...",
+    "연락처": "...",
+    "비고": "..."
+  }}
+}}
+
+값이 없는 필드는 빈 문자열("")로 두세요.
+"""
+        return prompt, f"{board_type}_info"
+
+
+def extract_data_from_text(title: str, content: str, board_type: str, author: str = "", date_str: str = "") -> dict | list:
+    """텍스트 게시글에서 board_type에 맞는 구조화된 데이터 추출. 구매/판매는 list 반환."""
+    log(f"AI 텍스트 분석 중 [{board_type}]: {title[:30]}...")
+
+    prompt_template, response_key = _build_text_prompt(board_type)
+
+    user_text = f"""{prompt_template}
+
+--- 게시글 정보 ---
+제목: {title}
+작성자: {author}
+작성일: {date_str}
+
+--- 본문 ---
+{content}
+"""
+
+    messages = [
+        {
+            "role": "user",
+            "content": user_text,
+        }
+    ]
+
+    try:
+        response = call_gpt_with_retry(messages, max_retry=3)
+        if not response:
+            return []
+
+        resp_content = response.choices[0].message.content
+        data = json.loads(resp_content)
+        result = data.get(response_key, [])
+
+        # 제목/작성자/작성일 보충
+        def _fill_common(item: dict):
+            if "제목" not in item or not item["제목"]:
+                item["제목"] = title
+            if "작성자" not in item or not item["작성자"]:
+                item["작성자"] = author
+            if "작성일" not in item or not item["작성일"]:
+                item["작성일"] = date_str
+
+        if isinstance(result, list):
+            for item in result:
+                if isinstance(item, dict):
+                    _fill_common(item)
+            return result
+        elif isinstance(result, dict):
+            _fill_common(result)
+            return [result]
+        return []
+    except json.JSONDecodeError as e:
+        log(f"JSON 파싱 실패: {e}")
+        return []
+    except Exception as e:
+        log(f"AI 텍스트 분석 오류: {e}")
+        return []
 
 
 # ─────────────────────────────────────────────
@@ -755,6 +1084,85 @@ def run_enhanced_processor(
     for board in active_boards:
         if check_pause_stop:
             check_pause_stop()
+
+        # 텍스트 게시판: text_data.json → GPT 구조화 파싱
+        if board in TEXT_BOARDS:
+            board_dir = os.path.join(daily_dir, board)
+            text_json = os.path.join(board_dir, "text_data", "text_data.json")
+            excel_dir = os.path.join(board_dir, "excel")
+
+            if not os.path.exists(text_json):
+                log(f"[{target_date}] [{board}] text_data.json 없음. 건너뜁니다.")
+                continue
+
+            # 이미 구조화된 Excel이 있으면 건너뜀
+            output_filename = f"{target_date.replace('-', '')}_{board}_데이터.xlsx"
+            if os.path.exists(os.path.join(excel_dir, output_filename)):
+                log(f"[{target_date}] [{board}] 이미 처리됨. 건너뜁니다.")
+                continue
+
+            os.makedirs(excel_dir, exist_ok=True)
+
+            with open(text_json, "r", encoding="utf-8") as f:
+                text_posts = json.load(f)
+
+            if not text_posts:
+                log(f"[{target_date}] [{board}] 텍스트 데이터 0건. 건너뜁니다.")
+                continue
+
+            log(f"[{target_date}] [{board}] 텍스트 구조화 분석 시작... ({len(text_posts)}건)")
+
+            if on_step:
+                on_step("ocr_start_board", {"date": target_date, "board": board, "total_images": len(text_posts)})
+
+            extracted_items = []
+            max_workers = int(os.getenv("OCR_WORKERS", "5"))
+
+            def _text_worker(post, _board=board, _on=on_step, _d=target_date, _t=len(text_posts)):
+                title = post.get("제목", "")
+                content = post.get("내용", "")
+                author = post.get("작성자", "")
+                date_s = post.get("작성일", "")
+                if _on:
+                    _on("ocr_image_start", {"date": _d, "board": _board, "filename": title[:30], "total": _t})
+                return title, extract_data_from_text(title, content, _board, author=author, date_str=date_s)
+
+            completed = 0
+            total_posts = len(text_posts)
+
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_text_worker, post): post for post in text_posts}
+                for fut in as_completed(futures):
+                    if check_pause_stop:
+                        check_pause_stop()
+                    completed += 1
+                    post = futures[fut]
+                    log(f"[{target_date}] [{board}] {completed}/{total_posts} 완료 ({post.get('제목', '')[:30]})")
+
+                    if on_step:
+                        on_step("ocr_image_done", {
+                            "date": target_date, "board": board,
+                            "filename": post.get("제목", "")[:30], "completed": completed, "total": total_posts,
+                        })
+
+                    try:
+                        title, info = fut.result()
+                        if info:
+                            items = info if isinstance(info, list) else [info]
+                            for item in items:
+                                if isinstance(item, dict):
+                                    item["수집일"] = target_date
+                                    extracted_items.append(item)
+                    except Exception as e:
+                        log(f"텍스트 분석 오류 ({post.get('제목', '')}): {e}")
+
+            if extracted_items:
+                normalized = apply_synonym_mapping(extracted_items, mapper, board)
+                output_path = os.path.join(excel_dir, output_filename)
+                for item in normalized:
+                    collected_board_data.append({"data": item, "board_type": board, "output_path": output_path})
+
+            continue
 
         board_dir = os.path.join(daily_dir, board)
         capture_dir = os.path.join(board_dir, "screenshots")
@@ -871,8 +1279,23 @@ def run_enhanced_batch_all(
 
             needs_processing = False
             for board in active_boards:
-                s_dir = os.path.join(entry_path, board, "screenshots")
                 e_dir = os.path.join(entry_path, board, "excel")
+                output_filename = f"{entry.replace('-', '')}_{board}_데이터.xlsx"
+
+                if board in TEXT_BOARDS:
+                    # 텍스트 게시판: text_data.json이 있지만 구조화 Excel이 없으면 처리 필요
+                    text_json = os.path.join(entry_path, board, "text_data", "text_data.json")
+                    if not os.path.exists(text_json):
+                        continue
+                    if force_reprocess:
+                        needs_processing = True
+                        break
+                    if not os.path.exists(os.path.join(e_dir, output_filename)):
+                        needs_processing = True
+                        break
+                    continue
+
+                s_dir = os.path.join(entry_path, board, "screenshots")
                 if not os.path.isdir(s_dir):
                     continue
                 has_imgs = any(
@@ -883,7 +1306,6 @@ def run_enhanced_batch_all(
                 if force_reprocess:
                     needs_processing = True
                     break
-                output_filename = f"{entry.replace('-', '')}_{board}_데이터.xlsx"
                 if not os.path.exists(os.path.join(e_dir, output_filename)):
                     needs_processing = True
                     break
