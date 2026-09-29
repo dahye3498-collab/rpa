@@ -523,6 +523,91 @@ def _wait_content_ready(page, timeout_sec=15):
     page.wait_for_timeout(300)
 
 
+BASE_VIEWPORT = {"width": 1280, "height": 1024}
+MAX_VIEWPORT_H = 8000
+
+
+def _screenshot_element_full(page, content_area, file_path, board_name="", log_fn=None):
+    """
+    #user_contents 는 iframe(name="down") 안에 있다.
+    Chromium 은 iframe 내부 요소를 스크린샷할 때 브라우저 뷰포트 밖 영역을
+    렌더하지 않아, 뷰포트 높이(1024 CSS px = device_scale_factor 2 기준 2048px)
+    아래는 캔버스만 잡히고 내용이 백지로 저장된다.
+    (2026-08-25 확인: 잘린 파일 81/111, 평균 높이 5,462px 중 2,049px만 유효)
+
+    -> 캡처 직전에 요소 높이만큼 뷰포트를 늘렸다가 원복한다.
+       iframe 요소 자체가 고정 높이인 경우를 대비해 높이도 함께 늘린다.
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+
+    resized = False
+    zoomed = False
+    try:
+        box = content_area.first.bounding_box()
+        need = int(box["height"]) + 200 if box else 0
+        if need > BASE_VIEWPORT["height"]:
+            target = min(need, MAX_VIEWPORT_H)
+            page.set_viewport_size({"width": BASE_VIEWPORT["width"], "height": target})
+            resized = True
+            # 부모 문서의 iframe 요소 높이도 콘텐츠 높이에 맞춘다
+            try:
+                page.evaluate(
+                    """(h) => {
+                        const f = document.querySelector('iframe[name=\"down\"]');
+                        if (f) { f.style.height = h + 'px'; f.setAttribute('height', h); }
+                    }""",
+                    target,
+                )
+            except Exception:
+                pass
+            page.wait_for_timeout(1200)
+            _wait_content_ready(page, timeout_sec=10)
+
+            # 뷰포트 상한을 넘는 초대형 표: 프레임 안에서 zoom 을 줄여 전체를 담는다.
+            # device_scale_factor=2 이므로 zoom 0.5 까지도 유효 해상도 1.0x 로 판독 가능.
+            if need > MAX_VIEWPORT_H:
+                z = max(MAX_VIEWPORT_H / float(need) * 0.95, 0.35)
+                _log(f"[{board_name}] 콘텐츠 {need}px > 상한 {MAX_VIEWPORT_H}px -> zoom {z:.2f} 축소 캡처")
+                try:
+                    rf = page.frame(name="down")
+                    if rf:
+                        rf.evaluate("(z) => { document.body.style.zoom = String(z); }", z)
+                        page.wait_for_timeout(1200)
+                        _wait_content_ready(page, timeout_sec=10)
+                        zoomed = True
+                        box2 = content_area.first.bounding_box()
+                        need2 = int(box2["height"]) + 200 if box2 else 0
+                        if need2 > 0:
+                            page.set_viewport_size({"width": BASE_VIEWPORT["width"],
+                                                    "height": min(need2, MAX_VIEWPORT_H)})
+                            page.wait_for_timeout(800)
+                        if need2 > MAX_VIEWPORT_H:
+                            _log(f"[{board_name}] 경고: zoom 후에도 {need2}px, 하단 잘릴 수 있음")
+                except Exception as e:
+                    _log(f"[{board_name}] zoom 축소 실패: {e}")
+    except Exception as e:
+        _log(f"[{board_name}] 뷰포트 확장 실패(기본 크기로 캡처): {e}")
+
+    try:
+        content_area.first.screenshot(path=file_path)
+    finally:
+        if zoomed:
+            try:
+                rf = page.frame(name="down")
+                if rf:
+                    rf.evaluate("() => { document.body.style.zoom = ''; }")
+            except Exception:
+                pass
+        if resized:
+            try:
+                page.set_viewport_size(dict(BASE_VIEWPORT))
+                page.wait_for_timeout(400)
+            except Exception:
+                pass
+
+
 def _download_content_images(page, out_path):
     """
     이미지형 품목표: #user_contents의 원본 이미지를 직접 다운로드해 저장.
@@ -779,7 +864,8 @@ def capture_recent_posts(page, board_name, vision_meat_root, start_date,
             if _download_content_images(page, file_path):
                 log(f"[{board_name}] 원본 이미지 저장: {file_name}")
             else:
-                content_area.first.screenshot(path=file_path)
+                _screenshot_element_full(page, content_area, file_path,
+                                         board_name=board_name, log_fn=log)
                 log(f"[{board_name}] 스크린샷 저장: {file_name}")
 
             captured_data.append({
@@ -848,7 +934,7 @@ def run_rpa(date_list=None, hooks: dict | None = None, target_boards=None, crede
         context = p.chromium.launch_persistent_context(
             SESSION_DIR,
             headless=bool(is_server),
-            viewport={'width': 1280, 'height': 1024},
+            viewport=dict(BASE_VIEWPORT),
             device_scale_factor=2,
         )
         page = context.pages[0] if context.pages else context.new_page()
